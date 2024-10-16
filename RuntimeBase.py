@@ -32,36 +32,68 @@ logger = logging.getLogger(__name__)
 class Runtime_Base:
     # region - Overridable Methods: These methods should be overridden by the child class
     def _cleanup(self):
+        """
+        This method is called when the class is no longer needed.
+        """
         pass
 
     def _write_data(self):
+        """
+        The write data thread is called in a loop.
+        """
         pass
 
     def _read_data(self):
+        """
+        The read data thread is called at the refresh rate specified.
+        """
         pass
 
     def _write_data_ending(self):
+        """
+        This method is called after the write data thread is stopped.
+        """
         pass
 
     def _read_data_ending(self):
+        """
+        This method is called after the read data thread is stopped.
+        """
         pass
 
     def _write_data_starting(self):
+        """
+        This method is called before the write data thread is started.
+        """
         pass
 
     def _read_data_starting(self):
+        """
+        This method is called before the read data thread is started.
+        """
         pass
 
     def _subscibe_event_stream(self, event_stream):
+        """
+        This method is called to subscribe to the event stream.
+        """
         pass
 
     # endregion
     # region - Class lifecycle
     def __init__(self, name):
+        """
+        Constructor
+        - Subscribe to the event stream
+        - Start the update threads
+        """
+        # The name is appended to the event stream strings
         self._name = name
 
+        # Thread Management
         self._thread_is_alive = False
-        self._refresh_rate = 20
+        self._refresh_period_ms = 20
+        self._write_sleep = 0.001
 
         self.__threads = []
 
@@ -69,18 +101,35 @@ class Runtime_Base:
         self.__subscibe_event_stream()
 
     def __del__(self):
+        """
+        Destructor
+        - Cleanup the class
+        """
         self.cleanup()
 
     # endregion
     # region - Properties
-    refresh_rate = property(
-        lambda self: self._refresh_rate,
+    refresh_period_ms = property(
+        lambda self: self._refresh_period_ms,
         lambda self, value: setattr(self, "_refresh_rate", value),
+    )
+
+    refresh_rate = property(
+        lambda self: self._refresh_period_ms,
+        lambda self, value: setattr(self, "_refresh_rate", value),
+    )
+
+    write_sleep_time = property(
+        lambda self: self._write_sleep_time,
+        lambda self, value: setattr(self, "_write_sleep_time", value),
     )
 
     # endregion
     # region - Thread Management
     def __start_update_thread(self):
+        """
+        Start the update threads
+        """
         if not self._thread_is_alive:
             self._thread_is_alive = True
             # Add internal methods to the thread methods
@@ -111,19 +160,28 @@ class Runtime_Base:
     # region - Worker Threads
 
     def __write_data(self):
-        self._read_data_starting()
+        """
+        Write data thread
+        - This methods runs in a loop and calls the _write_data method at the write sleep rate.
+        - It stops when the _thread_is_alive flag is set to False.
+        """
+        self._write_data_starting()
         while self._thread_is_alive:
             try:
                 self._write_data()
-                time.sleep(0.005)
-            except Exception as e:
+                time.sleep(self._write_sleep)
+            except Exception:
                 pass
                 # self._push_event(EVENT_TYPE_STATUS, status=f"Error Writing: {e}")
 
-        self._read_data_ending()
+        self._write_data_ending()
 
     def __read_data(self):
-
+        """
+        Read data thread
+        - This methods runs in a loop and calls the _read_data method at the refresh rate.
+        - It stops when the _thread_is_alive flag is set to False.
+        """
         self._read_data_starting()
 
         thread_start_time = time.time()
@@ -131,7 +189,7 @@ class Runtime_Base:
         while self._thread_is_alive:
             # Sleep for the refresh rate
             now = time.time()
-            sleep_time = self.refresh_rate / 1000 - (now - thread_start_time)
+            sleep_time = self._refresh_period_ms / 1000 - (now - thread_start_time)
             if sleep_time > 0:
                 thread_start_time = now + sleep_time
                 time.sleep(sleep_time)
@@ -144,8 +202,8 @@ class Runtime_Base:
             # Catch exceptions and log them to the status field
             try:
                 self._read_data()
-            except Exception as e:
-                time.sleep(1)
+            except Exception:
+                time.sleep(0.01)
 
         self._read_data_ending()
 
@@ -182,11 +240,14 @@ class Runtime_Base:
         self._cleanup()
 
     @final
-    def _add_thread_method(self, method):
+    def _add_thread_method(self, method, *args, **kwargs):
         """
         FINAL - Do not override this method
+        Add a method to the thread list
+        These methods will be created as a separate thread.
+        The method should not take any arguments.
         """
-        thread = threading.Thread(target=method)
+        thread = threading.Thread(target=method, args=args, kwargs=kwargs)
         self.__threads.append(thread)
         thread.start()
 
