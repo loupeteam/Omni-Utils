@@ -111,12 +111,12 @@ class Runtime_Base:
     # region - Properties
     refresh_period_ms = property(
         lambda self: self._refresh_period_ms,
-        lambda self, value: setattr(self, "_refresh_rate", value),
+        lambda self, value: setattr(self, "_refresh_period_ms", value),
     )
 
     refresh_rate = property(
         lambda self: self._refresh_period_ms,
-        lambda self, value: setattr(self, "_refresh_rate", value),
+        lambda self, value: setattr(self, "_refresh_period_ms", value),
     )
 
     write_sleep_time = property(
