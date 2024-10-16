@@ -129,7 +129,7 @@ class RuntimeUsd:
             for key, value in flat.items():
                 path = self.root_prim.GetPath()
                 full_key = path.pathString + "/" + "/".join(key.split("."))
-            with layer_context(self._stage, self.edit_layer):
+                # with layer_context(self._stage, self.edit_layer):
                 set_prim_value(self._stage, full_key, key, value)
 
     def _on_stage_event(self, event):
