@@ -4,9 +4,9 @@ from .BridgeManager import BridgeManager
 from .UsdManager import RuntimeUsd, get_options_from_prim, set_options_on_prim
 
 
-class Components:
+class Component:
     """
-    This is a holder for the Runtime and USD components of a single component
+    This is a holder for the Runtime and USD Component of a single component
     """
 
     def __init__(self, runtime, usd):
@@ -154,7 +154,9 @@ class System:
         if component_prim is None:
             return
 
-        component.options = get_options_from_prim(component_prim, self.default_properties)
+        component.options = get_options_from_prim(
+            component_prim, self.default_properties
+        )
 
     # Return the names of the components as a list
     def get_component_names(self) -> list[str]:
@@ -176,7 +178,7 @@ class System:
         input_options.update(options)
         prim_name = self.create_component_prim(name, input_options)
         if name not in self._components:
-            self._components[name] = Components(
+            self._components[name] = Component(
                 self._runtime_class(name, input_options),
                 RuntimeUsd(prim_name, self._manager_class(name)),
             )
