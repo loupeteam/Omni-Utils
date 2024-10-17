@@ -46,7 +46,11 @@ class System:
         self._manager_class = manager_class
 
     system_root = property(lambda self: self._system_root)
-
+    def get_normalize_prim_name(self, name: str) -> str:
+        if name.startswith("/"):
+            return name
+        return self.system_root + name
+    
     def cleanup(self):
         """
         Remove all the runtime and USD objects from the system
@@ -71,11 +75,14 @@ class System:
                 if not prim.HasAttribute(option):
                     continue
                 components_prims.append(prim)
-
+                break
         # For all the prims found, get the prim name and add it to the list
         names = dict()
         for component in components_prims:
-            name = component.GetPath().pathString.split("/")[-1]
+            if component.GetPath().pathString.startswith(self.system_root):
+                name = component.GetPath().pathString.split("/")[-1]
+            else:
+                name = component.GetPath().pathString
             names[name] = get_options_from_prim(component, self.default_properties)
         return names
 
@@ -107,7 +114,8 @@ class System:
         """
         Create a new component in the stage with the given name and options
         """
-        prim_name = self.system_root + name
+        prim_name = self.get_normalize_prim_name(name)
+
         component_prim = omni.usd.get_context().get_stage().DefinePrim(prim_name)
         set_options_on_prim(component_prim, options)
         return prim_name
@@ -131,7 +139,7 @@ class System:
         component_prim = (
             omni.usd.get_context()
             .get_stage()
-            .GetPrimAtPath(self.system_root + component_name)
+            .GetPrimAtPath(self.get_normalize_prim_name(component_name))
         )
         if component_prim is None:
             return
@@ -149,7 +157,7 @@ class System:
         component_prim = (
             omni.usd.get_context()
             .get_stage()
-            .GetPrimAtPath(self.system_root + component_name)
+            .GetPrimAtPath(self.get_normalize_prim_name(component_name))
         )
         if component_prim is None:
             return
@@ -174,10 +182,10 @@ class System:
         Create the PRIM in the stage
         Create the runtime and USD objects for the component
         """
-        input_options = self.default_properties.copy()
-        input_options.update(options)
-        prim_name = self.create_component_prim(name, input_options)
         if name not in self._components:
+            input_options = self.default_properties.copy()
+            input_options.update(options)
+            prim_name = self.create_component_prim(name, input_options)
             self._components[name] = Component(
                 self._runtime_class(name, input_options),
                 RuntimeUsd(prim_name, self._manager_class(name)),
