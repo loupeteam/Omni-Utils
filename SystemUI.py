@@ -238,6 +238,7 @@ class SystemUI:
     def refresh_components(self):
         self.components = self._component_manager.find_and_create_components()
         updateComboBox(self._component_dropdown, self.components)
+        asyncio.ensure_future(self.build_component_ui())
 
     ####################################
     ####################################
