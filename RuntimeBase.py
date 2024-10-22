@@ -97,9 +97,6 @@ class Runtime_Base:
 
         self.__threads = []
 
-        self.__start_update_thread()
-        self.__subscibe_event_stream()
-
     def __del__(self):
         """
         Destructor
@@ -231,6 +228,14 @@ class Runtime_Base:
 
     # endregion
     # region - External API
+    @final 
+    def start(self):
+        """
+        FINAL - Start the update threads
+        """
+        self.__subscibe_event_stream()
+        self.__start_update_thread()
+
     @final
     def cleanup(self):
         """
