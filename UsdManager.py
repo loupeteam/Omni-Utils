@@ -1,8 +1,11 @@
 import omni
 import omni.usd
+import numpy as np
 from omni.usd import StageEventType
-from pxr import Sdf, Tf
-from pxr import Usd
+import ast
+
+from pxr import Sdf, Tf, Gf
+from pxr import Usd, UsdGeom
 from .BridgeManager import BridgeManager
 from threading import RLock
 from contextlib import contextmanager
@@ -191,13 +194,17 @@ class RuntimeUsd:
             for key, value in flat.items():
                 path = self.root_prim.GetPath()
                 full_key = path.pathString + "/" + "/".join(key.split("."))
-                if not set_symbol_prim_value(self._stage, full_key, key, value):
-                    # If the prim does not exist, create it, but it must be done outside the change block
-                    create[full_key] = (key, value)
+                op = get_op_from_key(full_key, key)
+                if not op.execute(self._stage, value):
+                    create[full_key] = (op, value)
+                # if not set_symbol_prim_value(self._stage, full_key, key, value):
+                #     # If the prim does not exist, create it, but it must be done outside the change block
+                #     create[full_key] = (key, value)
 
         # Create new prims outside the change block
         for key, value in create.items():
-            create_symbol_prim_value(self._stage, key, value[0], value[1])
+            value[0].create(self._stage, value[1])
+            # get_op_from_key(key).create(self._stage, value)
 
     def _on_stage_event(self, event):
         """
@@ -239,15 +246,18 @@ def set_symbol_prim_value(stage, full_key, key, value) -> None:
         return False
 
     # Set the value of the prim
-    attr = prim.GetAttribute(ATTR_CURRENT_VALUE)
+    attr = prim.GetAttribute(key)
     if not attr:
         return False
-
-    attr.Set(value)
+    set_attr(attr, value)
     return True
 
 
-def create_symbol_prim_value(stage, full_key, key, value) -> None:
+def create_typed_prim(stage, full_key, value) -> None:
+    prim = stage.DefinePrim(full_key, value)
+
+
+def create_symbol_prim_value(stage, full_key, attr, key, value) -> None:
     """
     Create a prim for the symbol and set the value attribute
     Create the attributes for writing the symbol
@@ -256,15 +266,27 @@ def create_symbol_prim_value(stage, full_key, key, value) -> None:
     prim = stage.DefinePrim(full_key)
 
     # Set the value of the prim
-    create_attr(prim, ATTR_CURRENT_VALUE, value)
+    create_attr(prim, attr, value)
 
     # If the symbol has just been added, set the write attributes
     create_attr(prim, ATTR_WRITE_VALUE, value)
     create_attr(prim, ATTR_WRITE_ONCE, False)
     create_attr(prim, ATTR_WRITE_PAUSE, False)
     # Write the symbol last, so that we can detect that it has just been added
-    create_attr(prim, ATTR_WRITE_SYMBOL, key)
+    if key:
+        create_attr(prim, ATTR_WRITE_SYMBOL, key)
 
+
+def set_attr(attr: Usd.Attribute, value: any) -> None:
+    """
+    Set the value of an attribute
+    """
+    attr_type = attr.GetTypeName()
+
+    if attr_type.cppTypeName == "GfMatrix4d":
+        value = Gf.Matrix4d(np.array(ast.literal_eval(value)))
+
+    attr.Set(value)
 
 def set_or_create_attr(
     prim: Usd.Prim, attr_name: str, value: any
@@ -290,6 +312,10 @@ def create_attr(
     """
     Set an attribute on a prim, creating it if it does not exist.
     """
+    if attr_name == "xformOp:transform":
+        xformable = UsdGeom.Xformable(prim)
+        xformable.AddTransformOp()
+        # attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Matrix4d)
     if type(value) is str:
         attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.String)
     elif type(value) is bool:
@@ -297,7 +323,7 @@ def create_attr(
     else:
         attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Double)
 
-    attr.Set(value)
+    set_attr(attr, value)
     return attr
 
 
@@ -358,3 +384,47 @@ def set_options_on_prim(prim, options):
             elif type(value) is list:
                 attr = prim.CreateAttribute(key, Sdf.ValueTypeNames.StringArray)
         attr.Set(value)
+
+
+class UsdOp:
+    def __init__(self, operation, path, key, value):
+        self.operation = operation
+        self.path = path
+        self.key = key
+        self.value = value
+
+    def create(self, stage, value):
+        if self.operation == "attr":
+            create_symbol_prim_value(stage, self.path, self.value, self.key, value)
+        elif self.operation == "type":
+            create_typed_prim(stage, self.path, value)
+        else:
+            create_symbol_prim_value(stage, self.path, self.value, self.key, value)
+
+    def execute(self, stage, value):
+        if self.operation == "attr":
+            return set_symbol_prim_value(stage, self.path, self.value, value)
+        elif self.operation == "type":
+            # TODO: Check the type of the prim
+            prim = stage.GetPrimAtPath(self.path)
+            # If the prim does not exist, create it
+            if not prim:
+                return False
+            else:
+                return True
+        else:
+            return set_symbol_prim_value(stage, self.path, self.value, value)
+
+
+def get_op_from_key(full_path: str, key: str):
+    """
+    Get a property from a key
+    """
+    last = full_path.split("/")[-1]
+    command = last.split(":")
+    if len(command) > 1:
+        if command[0] == "usd":
+            key_path = "/".join(full_path.split("/")[:-1])
+            return UsdOp(command[1], key_path, key, ":".join(command[2:]))
+
+    return UsdOp("set", full_path, key, ATTR_CURRENT_VALUE)
