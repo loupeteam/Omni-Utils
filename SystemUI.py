@@ -150,7 +150,7 @@ class SystemUI:
                 with ui.HStack(spacing=5, height=0):
                     ui.Label("Add component", width=LABEL_WIDTH)
                     self._component_name_field = ui.StringField(
-                        ui.SimpleStringModel("PLC1")
+                        ui.SimpleStringModel("Component_1")
                     )
                     ui.Button("Add", clicked_fn=self.add_component, width=BUTTON_WIDTH)
 
