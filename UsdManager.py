@@ -382,7 +382,10 @@ def set_options_on_prim(prim, options):
             elif type(value) is str:
                 attr = prim.CreateAttribute(key, Sdf.ValueTypeNames.String)
             elif type(value) is list:
-                attr = prim.CreateAttribute(key, Sdf.ValueTypeNames.StringArray)
+                if type(value[0]) is str:
+                    attr = prim.CreateAttribute(key, Sdf.ValueTypeNames.StringArray)
+                elif type(value[0]) is float:
+                    attr = prim.CreateAttribute(key, Sdf.ValueTypeNames.FloatArray)
         attr.Set(value)
 
 
