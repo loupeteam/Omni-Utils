@@ -9,13 +9,13 @@ class Manager_Events:
     """
 
     def __init__(self, bridge_name: str):
-        self.EVENT_TYPE_DATA_INIT = "loupe.simulation.{bridge_name}.DATA_INIT"
-        self.EVENT_TYPE_DATA_READ = "loupe.simulation.{bridge_name}.DATA_READ"
-        self.EVENT_TYPE_DATA_READ_REQ = "loupe.simulation.{bridge_name}.DATA_READ_REQ"
-        self.EVENT_TYPE_DATA_WRITE_REQ = "loupe.simulation.{bridge_name}.DATA_WRITE_REQ"
-        self.EVENT_TYPE_CONNECTION = "loupe.simulation.{bridge_name}.CONNECTION"
-        self.EVENT_TYPE_STATUS = "loupe.simulation.{bridge_name}.STATUS"
-        self.EVENT_TYPE_ENABLE = "loupe.simulation.{bridge_name}.ENABLE"
+        self.EVENT_TYPE_DATA_INIT = f"loupe.simulation.{bridge_name}.DATA_INIT"
+        self.EVENT_TYPE_DATA_READ = f"loupe.simulation.{bridge_name}.DATA_READ"
+        self.EVENT_TYPE_DATA_READ_REQ = f"loupe.simulation.{bridge_name}.DATA_READ_REQ"
+        self.EVENT_TYPE_DATA_WRITE_REQ = f"loupe.simulation.{bridge_name}.DATA_WRITE_REQ"
+        self.EVENT_TYPE_CONNECTION = f"loupe.simulation.{bridge_name}.CONNECTION"
+        self.EVENT_TYPE_STATUS = f"loupe.simulation.{bridge_name}.STATUS"
+        self.EVENT_TYPE_ENABLE = f"loupe.simulation.{bridge_name}.ENABLE"
 
 
 class BridgeManager(ABC):
