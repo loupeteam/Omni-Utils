@@ -188,6 +188,10 @@ class SystemUI:
 
     async def build_component_ui(self):
         self._component_ui.clear()
+
+        if self.active_runtime is None:
+            return
+
         with self._component_ui:
             with ui.CollapsableFrame("Configuration", collapsed=False):
 
