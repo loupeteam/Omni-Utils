@@ -80,7 +80,7 @@ class System:
         names = dict()
         for component in components_prims:
             if component.GetPath().pathString.startswith(self.system_root):
-                name = component.GetPath().pathString.split("/")[-1]
+                name = component.GetPath().pathString.removeprefix(self.system_root)
             else:
                 name = component.GetPath().pathString
             names[name] = get_options_from_prim(component, self.default_properties)
