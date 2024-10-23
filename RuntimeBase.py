@@ -81,7 +81,7 @@ class Runtime_Base:
 
     # endregion
     # region - Class lifecycle
-    def __init__(self, name):
+    def __init__(self, name:str):
         """
         Constructor
         - Subscribe to the event stream

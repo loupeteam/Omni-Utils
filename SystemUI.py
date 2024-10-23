@@ -11,7 +11,7 @@
 import omni.ui as ui
 import omni.timeline
 import logging
-
+import carb.events
 import asyncio
 import time
 
@@ -29,6 +29,17 @@ BUTTON_WIDTH = 100
 
 
 class SystemUI:
+    """
+    Base class for creating a UI for a component.
+    
+    This class is meant to be inherited by the user to create a UI for a component.
+    
+    Override the following methods:
+        - build_component_ui_runtime
+        - _update_status
+        - _cleanup
+        - _on_data_read
+    """
     def __init__(self, component_manager: System, bridge_events: Manager_Events):
         # UI elements created using a UIElementWrapper instance
         self.wrapped_ui_elements = []
@@ -121,7 +132,7 @@ class SystemUI:
         self.add_status(data)
         self.update_status()
 
-    def on_data_read(self, event):
+    def on_data_read(self, event:carb.events.IEvent):
         data = event.payload["data"]
         data = json.dumps(data, indent=2, sort_keys=True)
         try:
@@ -131,7 +142,7 @@ class SystemUI:
             pass
 
     def on_menu_callback(self):
-        """Callback for when the UI is opened from the toolbar.
+        """**Overridable** Callback for when the UI is opened from the toolbar.
         This is called directly after build_ui().
         """
         pass
@@ -176,6 +187,9 @@ class SystemUI:
     def on_component_selected(
         self, item_model: ui.AbstractItemModel, item: ui.AbstractItem
     ):
+        """
+        Called when a component is selected from the dropdown
+        """
         components = self.components
 
         if len(components) < 1 or item_model.get_item_value_model().as_int >= len(
