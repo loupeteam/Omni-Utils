@@ -41,7 +41,7 @@ class System:
         """ """
         self.default_properties = DefaultAttributes
         self._system_root = system_root
-        self._components = dict()
+        self._components:dict[str, Component] = dict()
         self._runtime_class = runtime_class
         self._manager_class = manager_class
 
