@@ -94,6 +94,14 @@ class SystemUI:
         Perform any necessary cleanup such as removing active callback functions
         """
         self.unsubscribe_component()
+        self._cleanup()
+    
+    def _cleanup(self):
+        """
+        **Overridable** Called when the stage is closed or the extension is hot reloaded.
+        Perform any necessary cleanup such as removing active callback functions
+        """
+        pass
 
     def update_status(self):
         self.clean_status()
@@ -104,6 +112,14 @@ class SystemUI:
                 self._timer.cancel()
             self._timer = Timer(3, self.update_status)
             self._timer.start()
+        
+        self._update_status()
+    
+    def _update_status(self):
+        """
+        **Overridable** Called after the status is updated
+        """
+        pass
 
     def on_status(self, event):
         data = event.payload["status"]
@@ -140,6 +156,13 @@ class SystemUI:
             self.update_status()
         except Exception:
             pass
+        self._on_data_read(event)
+        
+    def _on_data_read(self, event:carb.events.IEvent):
+        """
+        **Overridable** Called when new data is read from the component after default processing
+        """
+        pass
 
     def on_menu_callback(self):
         """**Overridable** Callback for when the UI is opened from the toolbar.
@@ -212,6 +235,7 @@ class SystemUI:
                         ui.Label(self.active_runtime.name, width=LABEL_WIDTH)
 
                     self.build_component_ui_runtime()
+                    self.build_component_ui_configuration()
 
                     with ui.HStack(spacing=5, height=0):
                         ui.Label("Settings", width=LABEL_WIDTH)
@@ -226,6 +250,8 @@ class SystemUI:
                             width=BUTTON_WIDTH,
                         )
 
+            self.build_component_ui_end()
+            
             with ui.CollapsableFrame("Monitor", collapsed=False):
                 with ui.VStack(spacing=5, height=500):
                     with ui.HStack(spacing=5, height=0):
@@ -238,6 +264,24 @@ class SystemUI:
                     )
 
     def build_component_ui_runtime(self):
+        """
+        **DEPRECATED!** **Overridable** Build the UI for the runtime object of the selected component
+        Called by build_component_ui after the component is selected
+        """
+        pass
+
+    def build_component_ui_configuration(self):
+        """
+        **Overridable** Build the UI for the configuration of the selected component
+        Called by build_component_ui after the component is selected
+        """
+        pass
+    
+    def build_component_ui_end(self):
+        """
+        **Overridable** Build the UI for the selected component
+        Called by build_component_ui after the component is selected
+        """
         pass
 
     def add_component(self):
