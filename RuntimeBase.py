@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
         - _read_data_ending
         - _write_data_starting
         - _read_data_starting
-        - _subscibe_event_stream
+        - _subscribe_event_stream
     - The User should call the cleanup method when the class is no longer needed.
 
     Naming Conventions:
@@ -73,7 +73,7 @@ class Runtime_Base:
         """
         pass
 
-    def _subscibe_event_stream(self, event_stream):
+    def _subscribe_event_stream(self, event_stream:carb.events.IEventStream):
         """
         This method is called to subscribe to the event stream.
         """
@@ -147,11 +147,11 @@ class Runtime_Base:
 
     # endregion
     # region - Event Stream
-    def __subscibe_event_stream(self):
+    def __subscribe_event_stream(self):
         # Data stream where the extension will dump the data that it reads from the PLC.
         self._event_stream = omni.kit.app.get_app().get_message_bus_event_stream()
 
-        self._subscibe_event_stream(self._event_stream)
+        self._subscribe_event_stream(self._event_stream)
 
     # endregion
     # region - Worker Threads
