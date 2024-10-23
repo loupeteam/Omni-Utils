@@ -237,7 +237,7 @@ class Runtime_Base:
         """
         FINAL - Start the update threads
         """
-        self.__subscibe_event_stream()
+        self.__subscribe_event_stream()
         self.__start_update_thread()
 
     @final
