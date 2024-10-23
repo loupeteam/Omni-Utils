@@ -106,6 +106,10 @@ class Runtime_Base:
 
     # endregion
     # region - Properties
+    name = property(
+        lambda self: self._name,
+    )
+    
     refresh_period_ms = property(
         lambda self: self._refresh_period_ms,
         lambda self, value: setattr(self, "_refresh_period_ms", value),
