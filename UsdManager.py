@@ -285,7 +285,12 @@ def set_attr(attr: Usd.Attribute, value: any) -> None:
 
     if attr_type.cppTypeName == "GfMatrix4d":
         value = Gf.Matrix4d(np.array(ast.literal_eval(value)))
-
+    elif attr_type.cppTypeName == "GfVec3f":
+        val = ast.literal_eval(value)
+        value = Gf.Vec3f(val[0], val[1], val[2])
+    elif attr_type.cppTypeName == "GfVec3d":
+        val = ast.literal_eval(value)
+        value = Gf.Vec3d(val[0], val[1], val[2])
     attr.Set(value)
 
 def set_or_create_attr(
@@ -315,7 +320,12 @@ def create_attr(
     if attr_name == "xformOp:transform":
         xformable = UsdGeom.Xformable(prim)
         xformable.AddTransformOp()
-        # attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Matrix4d)
+    if attr_name == "xformOp:translate":
+        xformable = UsdGeom.Xformable(prim)
+        xformable.AddTranslateOp()
+    if attr_name == "xformOp:rotateXYZ":
+        xformable = UsdGeom.Xformable(prim)
+        xformable.AddRotateXYZOp()
     if type(value) is str:
         attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.String)
     elif type(value) is bool:
