@@ -102,10 +102,14 @@ class System:
         if components is None:
             return
 
-        # Add new components to the stage
+        # Create runtimes for the prims found in the stage. The prim already exists
+        # and its options were just read from it, so do not author them back: that
+        # would dirty the stage merely by opening it (and a dirty stage blocks a
+        # headless app from exiting, because omni.kit.window.file cancels shutdown
+        # to ask about unsaved changes).
         for name, options in components.items():
             if name not in self._components:
-                self.add_component(name, options)
+                self.add_component(name, options, author_prim=False)
 
         # Remove components that are not in the stage
         for name in list(self._components.keys()):
@@ -178,15 +182,13 @@ class System:
         """
         Get the names of all the components in the system
         """
-        component = self.find_components()
-        if component is None:
-            return []
         return list(self._components.keys())
 
-    def add_component(self, name, options):
+    def add_component(self, name, options, author_prim: bool = True):
         """
         Add a new component to the system with the given name and options
-        Create the PRIM in the stage
+        Create the PRIM in the stage (unless author_prim is False, for a prim that
+        already exists and whose options were read from it)
         Create the runtime and USD objects for the component
         """
         if name not in self._components:
@@ -202,7 +204,10 @@ class System:
             # an attribute to every component prim in every existing scene merely for
             # having opened it.
             mirror = input_options.pop(ATTR_MIRROR_USD, True)
-            prim_name = self.create_component_prim(name, input_options)
+            if author_prim:
+                prim_name = self.create_component_prim(name, input_options)
+            else:
+                prim_name = self.get_normalize_prim_name(name)
             self._components[name] = Component(
                 self._runtime_class(name, input_options),
                 RuntimeUsd(prim_name, self._manager_class(name), mirror=mirror),

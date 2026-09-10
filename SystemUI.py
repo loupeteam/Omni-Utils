@@ -298,7 +298,8 @@ class SystemUI:
         self.select_component(self.components[len(self.components) - 1])
 
     def refresh_components(self):
-        self.components = self._component_manager.find_and_create_components()
+        # find_and_create_components returns None when no stage is open
+        self.components = self._component_manager.find_and_create_components() or []
         updateComboBox(self._component_dropdown, self.components)
         asyncio.ensure_future(self.build_component_ui())
 
