@@ -1,7 +1,8 @@
 import omni
 from .RuntimeBase import Runtime_Base
 from .BridgeManager import BridgeManager
-from .UsdManager import RuntimeUsd, get_options_from_prim, set_options_on_prim
+from .UsdManager import (RuntimeUsd, get_options_from_prim, set_options_on_prim,
+                         ATTR_MIRROR_USD)
 
 
 class Component:
@@ -83,7 +84,13 @@ class System:
                 name = component.GetPath().pathString.removeprefix(self.system_root)
             else:
                 name = component.GetPath().pathString
-            names[name] = get_options_from_prim(component, self.default_properties)
+            options = get_options_from_prim(component, self.default_properties)
+            # Read directly rather than through the defaults, so an extension does not
+            # have to list this in its own property table to be able to turn the mirror
+            # off. Absent means on, so scenes that predate it are unaffected.
+            mirror = component.GetAttribute(ATTR_MIRROR_USD)
+            options[ATTR_MIRROR_USD] = bool(mirror.Get()) if mirror.IsValid() else True
+            names[name] = options
         return names
 
     def find_and_create_components(self) -> list[str]:
@@ -185,8 +192,18 @@ class System:
         if name not in self._components:
             input_options = self.default_properties.copy()
             input_options.update(options)
+            # Mirroring is a property of the USD side, not a reason to skip building
+            # it. RuntimeUsd also carries the other direction -- an edit of a
+            # write:value attribute becoming a write to the bridge -- and turning the
+            # mirror off must not take that with it.
+            #
+            # Popped rather than passed on: everything else here is round-tripped onto
+            # the prim by create_component_prim, and authoring this one back would add
+            # an attribute to every component prim in every existing scene merely for
+            # having opened it.
+            mirror = input_options.pop(ATTR_MIRROR_USD, True)
             prim_name = self.create_component_prim(name, input_options)
             self._components[name] = Component(
                 self._runtime_class(name, input_options),
-                RuntimeUsd(prim_name, self._manager_class(name)),
+                RuntimeUsd(prim_name, self._manager_class(name), mirror=mirror),
             )

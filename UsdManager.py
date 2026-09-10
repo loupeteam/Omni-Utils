@@ -3,6 +3,7 @@ import omni.usd
 import numpy as np
 from omni.usd import StageEventType
 import ast
+import logging
 
 from pxr import Sdf, Tf, Gf
 from pxr import Usd, UsdGeom
@@ -10,11 +11,25 @@ from .BridgeManager import BridgeManager
 from threading import RLock
 from contextlib import contextmanager
 
+logger = logging.getLogger(__name__)
+
 ATTR_CURRENT_VALUE = "value"
 ATTR_WRITE_VALUE = "write:value"
 ATTR_WRITE_PAUSE = "write:pause"
 ATTR_WRITE_ONCE = "write:once"
 ATTR_WRITE_SYMBOL = "symbol"
+
+# Opt out of mirroring read values onto prims. Set it on a component prim when
+# something else owns the USD those values would land on, or when the symbols
+# cannot be represented as scalar attributes. Default is on, so existing scenes
+# that carry no such attribute behave exactly as before.
+ATTR_MIRROR_USD = "bridge:MirrorToUsd"
+
+# How many times a symbol may fail to be written before it is given up on. More than
+# one because a failure is not always permanent: create_attr fixes an attribute's USD
+# type from the first value it ever sees, so a single bad sample -- a partial read
+# arriving as None -- would otherwise disable a symbol whose every later value is fine.
+UNWRITABLE_RETRIES = 3
 
 
 class RuntimeUsd:
@@ -25,7 +40,7 @@ class RuntimeUsd:
     - Subscribes to USD events for writing data
     """
 
-    def __init__(self, prim_path, manager: BridgeManager):
+    def __init__(self, prim_path, manager: BridgeManager, mirror: bool = True):
 
         # The user can specify the layer to edit
         # Notes: This has been disabled, since it breaks omnigraphs. We may want to enable it later.
@@ -34,8 +49,17 @@ class RuntimeUsd:
         self._root_prim = None
         self._root_prim_path = prim_path
         self._bridge_manager = manager
+        # Whether to copy read values onto prims. Off does NOT disable this object:
+        # it also carries the other direction -- _notice_changed turns an edit of a
+        # write:value attribute into a write to the bridge -- and that has nothing to
+        # do with mirroring.
+        self._mirror = mirror
         self._lock = RLock()
         self._data_update = dict()
+
+        # Symbols this mirror could not represent in USD. Kept so a value that cannot
+        # be written is attempted once rather than every frame -- see _on_update_event.
+        self._unwritable = dict()
 
         # The USD context doesn't change, so we can get it once
         self._usd_context = omni.usd.get_context()
@@ -95,8 +119,11 @@ class RuntimeUsd:
         )
 
         # Subscribe to data read events
-        # We need to update the USD with the new data as it comes in
-        self._bridge_manager.register_data_callback(self._on_data_read)
+        # We need to update the USD with the new data as it comes in.
+        # Not subscribing when mirroring is off is deliberate: an unread _data_update
+        # would otherwise grow for the life of the process.
+        if self._mirror:
+            self._bridge_manager.register_data_callback(self._on_data_read)
 
     def _unsubscribe(self):
         """
@@ -124,6 +151,36 @@ class RuntimeUsd:
         # Update the data in a threadsafe way
         with self._lock:
             self._data_update.update(data)
+
+    def _mark_unwritable(self, key, value, error):
+        """
+        Count a symbol that could not be mirrored, and give up on it after a few tries.
+
+        Without this, an unrepresentable value is retried on every app update forever:
+        the exception escapes _on_update_event, the log fills at frame rate, and the
+        application becomes unusable. Any array element symbol does it -- flatten_obj()
+        recurses into dicts but treats a list as a leaf, so "GVL.Axes[0].Position"
+        flattens to the single key "GVL.Axes" holding a list, and writing a list to a
+        scalar attribute raises.
+
+        A budget rather than one strike, because create_attr fixes an attribute's USD
+        type from the first value it ever sees: one bad sample -- a partial read
+        arriving as None -- would otherwise disable a symbol whose every later value is
+        fine. The count is cleared when a new stage is opened.
+
+        Giving up keeps the bridge itself working: the value still reaches data
+        subscribers through the read event, only its USD mirror is dropped.
+        """
+        self._unwritable[key] = self._unwritable.get(key, 0) + 1
+        if self._unwritable[key] < UNWRITABLE_RETRIES:
+            return
+        logger.warning(
+            "USD mirror: cannot represent '%s' (%s), so it will not be mirrored. "
+            "The value is still delivered to data subscribers. Reason: %s",
+            key,
+            type(value).__name__,
+            error,
+        )
 
     def _notice_changed(self, notice, stage):
         """
@@ -192,18 +249,26 @@ class RuntimeUsd:
         # Make changes to existing prims in the change block
         with Sdf.ChangeBlock():
             for key, value in flat.items():
+                if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES:
+                    continue
                 path = self.root_prim.GetPath()
                 full_key = path.pathString + "/" + "/".join(key.split("."))
                 op = get_op_from_key(full_key, key)
-                if not op.execute(self._stage, value):
-                    create[full_key] = (op, value)
+                try:
+                    if not op.execute(self._stage, value):
+                        create[full_key] = (op, value)
+                except Exception as e:
+                    self._mark_unwritable(key, value, e)
                 # if not set_symbol_prim_value(self._stage, full_key, key, value):
                 #     # If the prim does not exist, create it, but it must be done outside the change block
                 #     create[full_key] = (key, value)
 
         # Create new prims outside the change block
         for key, value in create.items():
-            value[0].create(self._stage, value[1])
+            try:
+                value[0].create(self._stage, value[1])
+            except Exception as e:
+                self._mark_unwritable(value[0].key, value[1], e)
             # get_op_from_key(key).create(self._stage, value)
 
     def _on_stage_event(self, event):
@@ -212,6 +277,9 @@ class RuntimeUsd:
         - Opened: Get the stage and listen for changes
         """
         if event.type == int(StageEventType.OPENED):
+            # A new stage means new prims and new attribute types, so a symbol that
+            # could not be written into the old one deserves another go.
+            self._unwritable.clear()
             self._stage = self._usd_context.get_stage()
             self._stage_listener = Tf.Notice.Register(
                 Usd.Notice.ObjectsChanged, self._notice_changed, self._stage
