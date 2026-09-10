@@ -283,4 +283,4 @@ class Runtime_Base:
 
 
 def get_stream_name(msg_type, name):
-    return carb.events.type_from_string(f"{msg_type}.{name})")
+    return carb.events.type_from_string(f"{msg_type}.{name}")

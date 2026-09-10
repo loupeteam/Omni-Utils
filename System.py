@@ -178,9 +178,6 @@ class System:
         """
         Get the names of all the components in the system
         """
-        component = self.find_components()
-        if component is None:
-            return []
         return list(self._components.keys())
 
     def add_component(self, name, options):
