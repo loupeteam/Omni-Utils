@@ -214,10 +214,16 @@ class RuntimeUsd:
                     # This allows the user to make changes to the write value without it writing
                     # intermediate values to the bridge
                     if write_once_attr.Get() or not write_pause_attr.Get():
-                        # Set the write attribute to False (in the session layer, so
-                        # resetting the trigger does not count as a user edit)
-                        with session_layer_context(self._stage):
+                        # Reset the trigger in the layer the user set it in (the
+                        # current edit target). The session layer is stronger than
+                        # the root layer, so resetting it there would mask every
+                        # later user edit of write:once. If an opinion survives in a
+                        # stronger layer, clear that one too.
+                        if write_once_attr.Get():
                             write_once_attr.Set(False)
+                            if write_once_attr.Get():
+                                with session_layer_context(self._stage):
+                                    write_once_attr.Set(False)
 
                         # Get the value attribute
                         write_value_attr = prim.GetAttribute(ATTR_WRITE_VALUE)
@@ -351,13 +357,29 @@ def create_symbol_prim_value(stage, full_key, attr, key, value) -> None:
     # Set the value of the prim
     create_attr(prim, attr, value)
 
-    # If the symbol has just been added, set the write attributes
-    create_attr(prim, ATTR_WRITE_VALUE, value)
-    create_attr(prim, ATTR_WRITE_ONCE, False)
-    create_attr(prim, ATTR_WRITE_PAUSE, False)
+    # Declare the write attributes but do not author a value for them. The mirror
+    # authors into the session layer, which is stronger than the root layer: a value
+    # authored here would mask everything the user later types into write:value in
+    # the property window (whose edits land in the root layer). With no opinion of
+    # our own, the user's opinion is the composed value.
+    declare_attr(prim, ATTR_WRITE_VALUE, value)
+    declare_attr(prim, ATTR_WRITE_ONCE, False)
+    declare_attr(prim, ATTR_WRITE_PAUSE, False)
     # Write the symbol last, so that we can detect that it has just been added
     if key:
         create_attr(prim, ATTR_WRITE_SYMBOL, key)
+
+
+def declare_attr(prim: Usd.Prim, attr_name: str, like_value: any) -> Usd.Attribute:
+    """
+    Create an attribute with the USD type matching like_value, without authoring a
+    value for it.
+    """
+    if type(like_value) is str:
+        return prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.String)
+    if type(like_value) is bool:
+        return prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Bool)
+    return prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Double)
 
 
 def set_attr(attr: Usd.Attribute, value: any) -> None:
