@@ -7,6 +7,9 @@ from typing import final
 
 logger = logging.getLogger(__name__)
 
+# How long cleanup() waits for a worker to notice that it should stop.
+JOIN_TIMEOUT_SEC = 2.0
+
 
 """ Notes about the Runtime_Base class:
     - This class is a base class that should be inherited by the child class.
@@ -133,10 +136,14 @@ class Runtime_Base:
         """
         if not self._thread_is_alive:
             self._thread_is_alive = True
-            # Add internal methods to the thread methods
+            # daemon=True covers the path where cleanup() is never reached: a fast
+            # shutdown, a headless script calling post_quit, a component created
+            # outside the extension's own lifecycle. Without it those loops keep the
+            # interpreter alive and the process never exits. The bounded join below
+            # covers the other path, where cleanup() is reached but a worker is slow.
             self.__threads = [
-                threading.Thread(target=self.__read_data),
-                threading.Thread(target=self.__write_data),
+                threading.Thread(target=self.__read_data, daemon=True),
+                threading.Thread(target=self.__write_data, daemon=True),
             ]
 
             for thread in self.__threads:
@@ -145,7 +152,18 @@ class Runtime_Base:
     def __stop_update_thread(self):
         self._thread_is_alive = False
         for thread in self.__threads:
-            thread.join()
+            # Bounded, because this join runs on the caller's thread while the worker
+            # can be inside a read that takes seconds -- a PLC that has gone away, say.
+            # The extension calls cleanup() on every stage open and close, so an
+            # unbounded join stalls the main thread there; __del__ calls it too, where
+            # blocking during garbage collection or interpreter shutdown can deadlock
+            # outright. The threads are daemons, so one that outlives its welcome does
+            # not keep the process alive.
+            thread.join(timeout=JOIN_TIMEOUT_SEC)
+            if thread.is_alive():
+                logger.warning(
+                    "%s did not stop within %.0fs; leaving it to the daemon flag",
+                    thread.name, JOIN_TIMEOUT_SEC)
 
         self.__threads = []
 
@@ -256,7 +274,8 @@ class Runtime_Base:
         These methods will be created as a separate thread.
         The method should not take any arguments.
         """
-        thread = threading.Thread(target=method, args=args, kwargs=kwargs)
+        thread = threading.Thread(target=method, args=args, kwargs=kwargs,
+                                  daemon=True)
         self.__threads.append(thread)
         thread.start()
 
