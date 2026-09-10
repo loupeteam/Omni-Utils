@@ -4,6 +4,7 @@ import numpy as np
 from omni.usd import StageEventType
 import ast
 import logging
+import re
 
 from pxr import Sdf, Tf, Gf
 from pxr import Usd, UsdGeom
@@ -42,10 +43,6 @@ class RuntimeUsd:
 
     def __init__(self, prim_path, manager: BridgeManager, mirror: bool = True):
 
-        # The user can specify the layer to edit
-        # Notes: This has been disabled, since it breaks omnigraphs. We may want to enable it later.
-        self.edit_layer = 0
-
         self._root_prim = None
         self._root_prim_path = prim_path
         self._bridge_manager = manager
@@ -80,7 +77,8 @@ class RuntimeUsd:
 
         self._root_prim = self._stage.GetPrimAtPath(self._root_prim_path)
         if not self._root_prim.IsValid():
-            self._root_prim = self._stage.DefinePrim(self._root_prim_path)
+            with session_layer_context(self._stage):
+                self._root_prim = self._stage.DefinePrim(self._root_prim_path)
 
         return self._root_prim
 
@@ -216,8 +214,10 @@ class RuntimeUsd:
                     # This allows the user to make changes to the write value without it writing
                     # intermediate values to the bridge
                     if write_once_attr.Get() or not write_pause_attr.Get():
-                        # Set the write attribute to False
-                        write_once_attr.Set(False)
+                        # Set the write attribute to False (in the session layer, so
+                        # resetting the trigger does not count as a user edit)
+                        with session_layer_context(self._stage):
+                            write_once_attr.Set(False)
 
                         # Get the value attribute
                         write_value_attr = prim.GetAttribute(ATTR_WRITE_VALUE)
@@ -246,30 +246,30 @@ class RuntimeUsd:
         # Keep track of the prims that need to be created
         create = dict()
 
-        # Make changes to existing prims in the change block
-        with Sdf.ChangeBlock():
-            for key, value in flat.items():
-                if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES:
-                    continue
-                path = self.root_prim.GetPath()
-                full_key = path.pathString + "/" + "/".join(key.split("."))
-                op = get_op_from_key(full_key, key)
-                try:
-                    if not op.execute(self._stage, value):
-                        create[full_key] = (op, value)
-                except Exception as e:
-                    self._mark_unwritable(key, value, e)
-                # if not set_symbol_prim_value(self._stage, full_key, key, value):
-                #     # If the prim does not exist, create it, but it must be done outside the change block
-                #     create[full_key] = (key, value)
+        # Everything the mirror authors goes into the session layer. The values are
+        # runtime state: they must not show up as unsaved changes, must not be saved
+        # into the user's file, and must not linger in a stage opened without the PLC.
+        with session_layer_context(self._stage):
+            # Make changes to existing prims in the change block
+            with Sdf.ChangeBlock():
+                root_path = self.root_prim.GetPath().pathString
+                for key, value in flat.items():
+                    if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES:
+                        continue
+                    full_key = symbol_to_prim_path(root_path, key)
+                    op = get_op_from_key(full_key, key)
+                    try:
+                        if not op.execute(self._stage, value):
+                            create[full_key] = (op, value)
+                    except Exception as e:
+                        self._mark_unwritable(key, value, e)
 
-        # Create new prims outside the change block
-        for key, value in create.items():
-            try:
-                value[0].create(self._stage, value[1])
-            except Exception as e:
-                self._mark_unwritable(value[0].key, value[1], e)
-            # get_op_from_key(key).create(self._stage, value)
+            # Create new prims outside the change block
+            for key, value in create.items():
+                try:
+                    value[0].create(self._stage, value[1])
+                except Exception as e:
+                    self._mark_unwritable(value[0].key, value[1], e)
 
     def _on_stage_event(self, event):
         """
@@ -287,17 +287,32 @@ class RuntimeUsd:
 
 
 @contextmanager
-def layer_context(stage, layer_id: int | str = 0):
+def session_layer_context(stage):
     """
-    Context manager to set the current layer for the stage
+    Context manager that directs edits to the stage's session layer.
+    The session layer is composed like any other, so the prims are visible to the
+    property window, scripts and OmniGraph, but it is never saved and its edits do
+    not count as pending changes.
     """
-    layer = stage.GetLayerStack()[layer_id]
-    if not layer:
-        layer = stage.GetLayerStack()[0]
-
-    edit_target = Usd.EditTarget(layer)
+    edit_target = Usd.EditTarget(stage.GetSessionLayer())
     with Usd.EditContext(stage, edit_target):
         yield
+
+
+_ARRAY_INDEX = re.compile(r"\[(\d+)\]")
+
+
+def symbol_to_prim_path(root_path: str, symbol: str) -> str:
+    """
+    Map a PLC symbol to the path of its mirror prim under the component prim.
+
+    Struct members become child prims. An array element becomes a child prim of
+    the array named "_<index>", because a USD prim name cannot start with a digit
+    or contain brackets:
+
+        "GVL.Axes[0].ActualPosition" -> "<root>/GVL/Axes/_0/ActualPosition"
+    """
+    return root_path + "/" + "/".join(_ARRAY_INDEX.sub(r"/_\1", symbol).split("."))
 
 
 def set_symbol_prim_value(stage, full_key, key, value) -> None:
@@ -419,18 +434,31 @@ def get_or_create_attr(
 
 def flatten_obj(obj: dict[str, any]) -> dict[str, any]:
     """
-    Flattens a nested object into a single-level dictionary.
+    Flattens a nested object into a single-level dictionary keyed by PLC symbol.
+
+    Structs (dicts) contribute ".member"; arrays (lists) contribute "[index]", so
+    the keys are the symbol names the PLC knows and can be written straight back:
+
+        {"GVL": {"Axes": [{"Pos": 1.0}, None, {"Pos": 3.0}]}}
+        -> {"GVL.Axes[0].Pos": 1.0, "GVL.Axes[2].Pos": 3.0}
+
+    None entries are the parser's placeholders for array indices that were not
+    read, and are skipped.
     """
 
-    def flatten(obj, key=""):
+    def flatten(obj, key):
         if isinstance(obj, dict):
             for k in obj:
-                flatten(obj[k], key + k + ".")
+                flatten(obj[k], k if key == "" else key + "." + k)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if item is not None:
+                    flatten(item, "{}[{}]".format(key, i))
         else:
-            flat_obj[key[:-1]] = obj
+            flat_obj[key] = obj
 
     flat_obj = {}
-    flatten(obj)
+    flatten(obj, "")
     return flat_obj
 
 
