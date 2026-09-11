@@ -272,9 +272,12 @@ class RuntimeUsd:
         # runtime state: they must not show up as unsaved changes, must not be saved
         # into the user's file, and must not linger in a stage opened without the PLC.
         with session_layer_context(self._stage):
+            # Resolve (and if needed define) the root prim before the change block:
+            # a prim defined inside an Sdf.ChangeBlock is not composed until the
+            # block ends, so DefinePrim fails with "Failed to define UsdPrim".
+            root_path = self.root_prim.GetPath().pathString
             # Make changes to existing prims in the change block
             with Sdf.ChangeBlock():
-                root_path = self.root_prim.GetPath().pathString
                 for key, value in flat.items():
                     if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES:
                         continue
