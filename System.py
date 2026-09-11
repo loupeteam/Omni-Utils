@@ -58,7 +58,8 @@ class System:
         """
         for component in self._components.values():
             component.runtime.cleanup()
-            component.usd.cleanup()
+            if component.usd is not None:
+                component.usd.cleanup()
 
         self._components.clear()
 
@@ -115,7 +116,8 @@ class System:
         for name in list(self._components.keys()):
             if name not in components:
                 self._components[name].runtime.cleanup()
-                self._components[name].usd.cleanup()
+                if self._components[name].usd is not None:
+                    self._components[name].usd.cleanup()
                 del self._components[name]
 
         # Return the names of the components
@@ -208,7 +210,17 @@ class System:
                 prim_name = self.create_component_prim(name, input_options)
             else:
                 prim_name = self.get_normalize_prim_name(name)
-            self._components[name] = Component(
-                self._runtime_class(name, input_options),
-                RuntimeUsd(prim_name, self._manager_class(name), mirror=mirror),
-            )
+            # Register the runtime before building the USD side: RuntimeUsd takes a
+            # Manager for this name, and a Manager checks that its PLC is loaded,
+            # so building it first made every stage open log a false "no PLC prim"
+            # warning about a component that was one statement away from existing.
+            component = Component(self._runtime_class(name, input_options), None)
+            self._components[name] = component
+            try:
+                component.usd = RuntimeUsd(
+                    prim_name, self._manager_class(name), mirror=mirror
+                )
+            except Exception:
+                component.runtime.cleanup()
+                del self._components[name]
+                raise
