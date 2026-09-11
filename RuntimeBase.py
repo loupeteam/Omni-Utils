@@ -124,8 +124,8 @@ class Runtime_Base:
     )
 
     write_sleep_time = property(
-        lambda self: self._write_sleep_time,
-        lambda self, value: setattr(self, "_write_sleep_time", value),
+        lambda self: self._write_sleep,
+        lambda self, value: setattr(self, "_write_sleep", value),
     )
 
     # endregion

@@ -318,11 +318,9 @@ class SystemUI:
 
 def updateComboBox(comboBox, items):
     combo_box = comboBox.model
-    ...
     # clean combo box
     for item in combo_box.get_item_children():
         combo_box.remove_item(item)
-    ...
     # fill combo box
     for value in items:
         combo_box.append_child_item(None, ui.SimpleStringModel(value))

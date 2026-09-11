@@ -53,6 +53,7 @@ class RuntimeUsd:
         self._mirror = mirror
         self._lock = RLock()
         self._data_update = dict()
+        self._in_notice = False
 
         # Symbols this mirror could not represent in USD. Kept so a value that cannot
         # be written is attempted once rather than every frame -- see _on_update_event.
@@ -188,8 +189,23 @@ class RuntimeUsd:
         if self._stage.expired:
             return
 
+        # Resetting write:once below edits the stage, which re-enters this handler
+        # synchronously; without the guard the nested call sent the value a second
+        # time.
+        if self._in_notice:
+            return
+        self._in_notice = True
+        try:
+            self._handle_write_changes(notice)
+        finally:
+            self._in_notice = False
+
+    def _handle_write_changes(self, notice):
+        # Sdf.Path prefix, not a string prefix: "/PLC/PLC1" is a string prefix of
+        # "/PLC/PLC10/...", which would send PLC10's writes to PLC1 as well.
+        root = Sdf.Path(self._root_prim_path)
         for changed in list(notice.GetChangedInfoOnlyPaths()):
-            if str(changed).startswith(self._root_prim_path):
+            if changed.HasPrefix(root):
                 if (
                     changed.name == ATTR_WRITE_VALUE
                     or changed.name == ATTR_WRITE_ONCE
