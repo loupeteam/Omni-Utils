@@ -32,6 +32,12 @@ ATTR_MIRROR_USD = "bridge:MirrorToUsd"
 # arriving as None -- would otherwise disable a symbol whose every later value is fine.
 UNWRITABLE_RETRIES = 3
 
+# A given-up symbol is tried again once every this many updates, so a symbol that
+# failed for a while (a PLC that dropped out and came back) recovers by itself
+# instead of staying dark until the stage is reopened. One attempt per ~2 s at
+# 60 fps keeps the log quiet: the warning is logged once, when the symbol is given up.
+UNWRITABLE_RETRY_EVERY = 120
+
 
 class RuntimeUsd:
     """
@@ -58,6 +64,7 @@ class RuntimeUsd:
         # Symbols this mirror could not represent in USD. Kept so a value that cannot
         # be written is attempted once rather than every frame -- see _on_update_event.
         self._unwritable = dict()
+        self._update_count = 0
 
         # The USD context doesn't change, so we can get it once
         self._usd_context = omni.usd.get_context()
@@ -171,7 +178,9 @@ class RuntimeUsd:
         subscribers through the read event, only its USD mirror is dropped.
         """
         self._unwritable[key] = self._unwritable.get(key, 0) + 1
-        if self._unwritable[key] < UNWRITABLE_RETRIES:
+        if self._unwritable[key] != UNWRITABLE_RETRIES:
+            # below the budget: keep trying quietly; above it: this was a periodic
+            # retry that failed again, already warned
             return
         logger.warning(
             "USD mirror: cannot represent '%s' (%s), so it will not be mirrored. "
@@ -271,6 +280,9 @@ class RuntimeUsd:
         # Everything the mirror authors goes into the session layer. The values are
         # runtime state: they must not show up as unsaved changes, must not be saved
         # into the user's file, and must not linger in a stage opened without the PLC.
+        self._update_count += 1
+        retry_now = self._update_count % UNWRITABLE_RETRY_EVERY == 0
+
         with session_layer_context(self._stage):
             # Resolve (and if needed define) the root prim before the change block:
             # a prim defined inside an Sdf.ChangeBlock is not composed until the
@@ -279,13 +291,16 @@ class RuntimeUsd:
             # Make changes to existing prims in the change block
             with Sdf.ChangeBlock():
                 for key, value in flat.items():
-                    if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES:
+                    if self._unwritable.get(key, 0) >= UNWRITABLE_RETRIES and not retry_now:
                         continue
                     full_key = symbol_to_prim_path(root_path, key)
                     op = get_op_from_key(full_key, key)
                     try:
                         if not op.execute(self._stage, value):
                             create[full_key] = (op, value)
+                        else:
+                            # written: whatever failed before is over
+                            self._unwritable.pop(key, None)
                     except Exception as e:
                         self._mark_unwritable(key, value, e)
 
@@ -293,6 +308,7 @@ class RuntimeUsd:
             for key, value in create.items():
                 try:
                     value[0].create(self._stage, value[1])
+                    self._unwritable.pop(value[0].key, None)
                 except Exception as e:
                     self._mark_unwritable(value[0].key, value[1], e)
 
