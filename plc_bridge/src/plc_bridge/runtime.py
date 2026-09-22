@@ -8,6 +8,7 @@ Plain Python: nothing in this package may import from Omniverse or Kit.
 """
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Callable, Iterable
@@ -35,6 +36,9 @@ IDLE_SEC = 1.0
 # An unchanged read problem is repeated at this interval, so a status display
 # that expires old entries (the bridge UI drops them after 3 s) keeps showing it.
 PROBLEM_REPEAT_SEC = 2.0
+# The longest refresh period honoured. Bounds Event.wait (which overflows on
+# huge values) and keeps a typo from parking the loop for hours.
+MAX_PERIOD_SEC = 60.0
 
 
 class _Run:
@@ -235,6 +239,8 @@ class PlcRuntime:
         with self._lifecycle_lock:
             if self._run is not None:
                 return
+            # A new run reports its own problems from scratch.
+            self._read_problem = None
             # Daemons, so a host that never reaches stop() (a fast shutdown, a
             # script that just exits) is not kept alive by these loops.
             self._run = run = _Run(self._name, self._read_loop, self._write_loop)
@@ -481,24 +487,30 @@ class PlcRuntime:
     def _read_loop_body(self, run: _Run):
         next_scan = time.monotonic()
         while not run.stop.is_set():
-            # Hold the refresh period from scan start to scan start. When a scan
-            # overran, start the next one now rather than trying to catch up.
-            now = time.monotonic()
-            next_scan = max(next_scan, now)
-            if run.wait(next_scan - now):
-                break
-
             # Nothing in here may end the thread: a bad refresh_ms (None from an
-            # unset prim attribute, say) is logged and treated as idle, and the
-            # loop keeps going so that enabled / stop() still work.
+            # unset prim attribute, inf, nan, a string) is logged and treated as
+            # idle, and the loop keeps going so that enabled / stop() still work.
             try:
-                next_scan += float(self.refresh_ms) / 1000
+                # Hold the refresh period from scan start to scan start. When a
+                # scan overran, start the next one now rather than catching up.
+                now = time.monotonic()
+                next_scan = max(next_scan, now)
+                if run.wait(min(next_scan - now, MAX_PERIOD_SEC)):
+                    break
+                next_scan += self._period()
                 active = self._scan_read(run)
             except Exception:
                 logger.exception("%s: read scan failed", self._name)
                 active = False
             if not active:
                 next_scan = time.monotonic() + IDLE_SEC
+
+    def _period(self) -> float:
+        """The refresh period in seconds, validated: finite, not negative, capped."""
+        period = float(self.refresh_ms) / 1000
+        if not math.isfinite(period) or period < 0:
+            raise ValueError(f"refresh_ms must be a finite, non-negative number, got {self.refresh_ms!r}")
+        return min(period, MAX_PERIOD_SEC)
 
     def _read_loop_exit(self):
         # Close the connection on the way out, but do not report it: stop() does

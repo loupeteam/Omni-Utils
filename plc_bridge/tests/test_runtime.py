@@ -726,3 +726,60 @@ def test_a_bad_refresh_value_does_not_kill_the_read_thread(driver, caplog):
     plc.stop()
     assert not driver.connected and not plc.is_connected
     assert not [t for t in threading.enumerate() if t.name.startswith("F-")]
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -5, "abc"])
+def test_pathological_refresh_values_are_logged_and_idle(driver, caplog, bad):
+    import logging
+    plc = PlcRuntime(driver, name="P", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    got = threading.Event()
+    plc.on_data(lambda d: got.set())
+    plc.start()
+    assert got.wait(2)
+    reads_before = len(driver.reads)
+    with caplog.at_level(logging.ERROR, logger="plc_bridge.runtime"):
+        plc.refresh_ms = bad
+        plc.reconnect()  # wake, so the bad value is seen at once
+        time.sleep(0.3)
+    assert "read scan failed" in caplog.text
+    assert [t for t in threading.enumerate() if t.name == "P-read"]  # alive
+    assert len(driver.reads) - reads_before < 20  # idle, not spinning
+    plc.refresh_ms = 5
+    plc.reconnect()
+    got.clear()
+    assert got.wait(2)
+    plc.stop()
+    assert not driver.connected and not plc.is_connected
+
+
+def test_a_new_run_reports_a_persisting_problem_afresh(plc, driver):
+    rec = Recorder(plc)
+    driver.read_error = RuntimeError("boom")
+    plc.scan_read()
+    assert rec.status == ["Error Reading: boom"]
+    plc.start()
+    plc.stop()
+    plc.scan_read()
+    assert rec.status[-1] == "Error Reading: boom"
+
+
+def test_a_huge_refresh_value_is_capped_not_fatal(driver, caplog):
+    """1e13 ms is finite and non-negative: honoured up to MAX_PERIOD_SEC, no error."""
+    import logging
+    plc = PlcRuntime(driver, name="H", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    got = threading.Event()
+    plc.on_data(lambda d: got.set())
+    plc.start()
+    assert got.wait(2)
+    with caplog.at_level(logging.ERROR, logger="plc_bridge.runtime"):
+        plc.refresh_ms = 1e13
+        time.sleep(0.2)
+    assert caplog.text == ""
+    assert [t for t in threading.enumerate() if t.name == "H-read"]
+    plc.refresh_ms = 5
+    plc.reconnect()  # wakes the (capped) wait
+    got.clear()
+    assert got.wait(2)
+    plc.stop()
