@@ -828,3 +828,80 @@ def test_a_burst_of_wakes_does_not_push_the_schedule_out(driver):
     reads = len(driver.reads)
     assert _wait_for_reads(driver, reads + 1, timeout=0.5)  # next scan within a period
     plc.stop()
+
+
+def test_a_timed_wait_returning_early_does_not_speed_up_the_cadence(driver, monkeypatch):
+    """
+    Event.wait can return a hair before its timeout (timer granularity). The
+    schedule must stay absolute on a timeout, and rebase only on a real wake.
+    """
+    import plc_bridge.runtime as rt
+
+    class Clock:
+        now = 1000.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+    class FakeRun:
+        def __init__(self):
+            self.stop = threading.Event()
+            self.waits = []
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            Clock.now += max(timeout - 0.001, 0)  # returns 1 ms early, not woken
+            if len(self.waits) >= 50:
+                self.stop.set()
+            return False
+
+    monkeypatch.setattr(rt.time, "monotonic", Clock.monotonic)
+    plc = PlcRuntime(driver, name="C", enabled=True, refresh_ms=20)
+    plc.set_read_variables(["GVL.a"])
+    run = FakeRun()
+    plc._run = run  # the loop only acts for the current run
+    scans = []
+    original_read = driver.read
+    driver.read = lambda symbols: (scans.append(Clock.now), original_read(symbols))[1]
+    plc._read_loop_body(run)
+    # 49 scans at a 20 ms period span 48 x 20 ms of fake time, not 48 x 19 ms
+    assert len(scans) == 49
+    assert abs((scans[-1] - scans[0]) - 48 * 0.020) < 0.002, scans[-1] - scans[0]
+    gaps = [round(b - a, 3) for a, b in zip(scans, scans[1:])]
+    assert set(gaps[1:]) == {0.02}, gaps  # the first gap absorbs the initial early return
+
+
+def test_a_real_wake_rebases_the_schedule(driver, monkeypatch):
+    import plc_bridge.runtime as rt
+
+    class Clock:
+        now = 1000.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+    class FakeRun:
+        def __init__(self):
+            self.stop = threading.Event()
+            self.waits = []
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            if len(self.waits) == 2:
+                Clock.now += 0.005  # woken 5 ms into a 20 ms wait
+                return True
+            Clock.now += timeout
+            if len(self.waits) >= 4:
+                self.stop.set()
+            return False
+
+    monkeypatch.setattr(rt.time, "monotonic", Clock.monotonic)
+    plc = PlcRuntime(driver, name="C2", enabled=True, refresh_ms=20)
+    plc.set_read_variables(["GVL.a"])
+    run = FakeRun()
+    plc._run = run
+    plc._read_loop_body(run)
+    # after the wake at +5 ms the next scan is a full period later, not 15 ms
+    assert [round(w, 3) for w in run.waits] == [0.0, 0.02, 0.02, 0.02]

@@ -62,12 +62,12 @@ class _Run:
         Sleep up to `timeout` seconds; return early when woken or stopped.
 
         Returns:
-            True when the run should end.
+            True when woken (or stopped) before the timeout ran out, False when
+            the timeout ran out. Check `stop` for which.
         """
-        if timeout > 0:
-            self.wake.wait(timeout)
+        woken = self.wake.wait(timeout) if timeout > 0 else self.wake.is_set()
         self.wake.clear()
-        return self.stop.is_set()
+        return woken
 
 
 class PlcRuntime:
@@ -505,14 +505,20 @@ class PlcRuntime:
                 # scan overran, start the next one now rather than catching up.
                 now = time.monotonic()
                 next_scan = max(next_scan, now)
-                if run.wait(min(next_scan - now, MAX_PERIOD_SEC)):
+                woken = run.wait(min(next_scan - now, MAX_PERIOD_SEC))
+                if run.stop.is_set():
                     break
-                # An early wake (enabled, reconnect, refresh_ms) scans now, so
-                # the next scan is one period from here, not from the old
-                # target: a lowered refresh rate or an enable takes effect at
-                # once instead of after the rest of the old period. An on-time
-                # wake keeps the fixed cadence.
-                next_scan = min(next_scan, time.monotonic()) + self._period()
+                if woken:
+                    # An early wake (enabled, reconnect, refresh_ms) scans now,
+                    # and the next scan is one period from here, not from the
+                    # old target: a lowered refresh rate or an enable takes
+                    # effect at once instead of after the rest of the old period.
+                    next_scan = time.monotonic() + self._period()
+                else:
+                    # The timeout ran out: keep the absolute cadence. A timed
+                    # wait may return a little early (timer granularity), and
+                    # rebasing on that would run faster than the period.
+                    next_scan += self._period()
                 active = self._scan_read(run)
             except Exception:
                 logger.exception("%s: read scan failed", self._name)
