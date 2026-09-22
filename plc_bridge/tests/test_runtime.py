@@ -783,3 +783,48 @@ def test_a_huge_refresh_value_is_capped_not_fatal(driver, caplog):
     got.clear()
     assert got.wait(2)
     plc.stop()
+
+
+def _wait_for_reads(driver, count, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while len(driver.reads) < count and time.monotonic() < deadline:
+        time.sleep(0.002)
+    return len(driver.reads) >= count
+
+
+def test_lowering_the_refresh_rate_takes_effect_at_once(driver):
+    plc = PlcRuntime(driver, name="Q", enabled=True, refresh_ms=3000)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    assert _wait_for_reads(driver, 1)
+    time.sleep(0.05)
+    started = time.monotonic()
+    plc.refresh_ms = 5
+    assert _wait_for_reads(driver, 4, timeout=1.0)
+    assert time.monotonic() - started < 0.5  # not 2.9 s
+    plc.stop()
+
+
+def test_enable_from_idle_polls_at_the_refresh_rate_straight_away(driver):
+    plc = PlcRuntime(driver, name="E", refresh_ms=10)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    time.sleep(0.05)  # idle: parked IDLE_SEC ahead
+    started = time.monotonic()
+    plc.enabled = True
+    assert _wait_for_reads(driver, 3, timeout=1.0)
+    assert time.monotonic() - started < 0.3  # the second read is 10 ms on, not ~1 s
+    plc.stop()
+
+
+def test_a_burst_of_wakes_does_not_push_the_schedule_out(driver):
+    plc = PlcRuntime(driver, name="B", enabled=True, refresh_ms=100)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    assert _wait_for_reads(driver, 1)
+    for _ in range(200):
+        plc.enabled = True
+        time.sleep(0.002)
+    reads = len(driver.reads)
+    assert _wait_for_reads(driver, reads + 1, timeout=0.5)  # next scan within a period
+    plc.stop()

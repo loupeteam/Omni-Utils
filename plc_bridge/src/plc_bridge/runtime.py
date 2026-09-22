@@ -94,7 +94,7 @@ class PlcRuntime:
                  enabled: bool = False, write_sleep: float = 0.001):
         self._driver = driver
         self._name = name
-        self.refresh_ms = refresh_ms
+        self._refresh_ms = refresh_ms
         self.write_sleep = write_sleep
         self._enabled = enabled
 
@@ -139,6 +139,16 @@ class PlcRuntime:
     driver = property(lambda self: self._driver)
     is_connected = property(lambda self: self._is_connected)
     is_running = property(lambda self: self._run is not None)
+
+    @property
+    def refresh_ms(self):
+        """The read period in milliseconds. Setting it takes effect at once."""
+        return self._refresh_ms
+
+    @refresh_ms.setter
+    def refresh_ms(self, value):
+        self._refresh_ms = value
+        self._wake()
 
     @property
     def enabled(self) -> bool:
@@ -497,7 +507,12 @@ class PlcRuntime:
                 next_scan = max(next_scan, now)
                 if run.wait(min(next_scan - now, MAX_PERIOD_SEC)):
                     break
-                next_scan += self._period()
+                # An early wake (enabled, reconnect, refresh_ms) scans now, so
+                # the next scan is one period from here, not from the old
+                # target: a lowered refresh rate or an enable takes effect at
+                # once instead of after the rest of the old period. An on-time
+                # wake keeps the fixed cadence.
+                next_scan = min(next_scan, time.monotonic()) + self._period()
                 active = self._scan_read(run)
             except Exception:
                 logger.exception("%s: read scan failed", self._name)
