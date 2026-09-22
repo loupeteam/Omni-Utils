@@ -15,6 +15,8 @@ from typing import Any, Mapping
 
 @lru_cache(maxsize=8)
 def _splitter(separators: str):
+    if not separators:
+        raise ValueError("symbol_separators must not be empty")
     return re.compile("[" + re.escape(separators) + "]")
 
 
@@ -31,12 +33,23 @@ def _ensure_list_with_index(list_name: str, target: dict, index: int) -> list:
     return existing
 
 
-def _split_index(part: str):
-    """'Axes[3]' -> ('Axes', 3); 'Axes' -> ('Axes', None)."""
+def _split_index(part: str, symbol: str):
+    """
+    'Axes[3]' -> ('Axes', 3); 'Axes' -> ('Axes', None).
+
+    Raises ValueError, naming the symbol, for anything else: a multi-dimensional
+    index ('a[0,1]'), an array of arrays ('a[1][2]'), a stray bracket. The
+    caller can then report which symbol it cannot represent.
+    """
     if "[" not in part:
         return part, None
-    name, index = part.split("[", 1)
-    return name, int(index[:-1])
+    name, _, index = part.partition("[")
+    if part.count("[") != 1 or not index.endswith("]"):
+        raise ValueError(f"cannot index symbol '{symbol}': '{part}'")
+    try:
+        return name, int(index[:-1])
+    except ValueError:
+        raise ValueError(f"cannot index symbol '{symbol}': '{part}'") from None
 
 
 def nest_symbol(target: dict, symbol: str, value: Any, separators: str = ".") -> dict:
@@ -58,11 +71,14 @@ def nest_symbol(target: dict, symbol: str, value: Any, separators: str = ".") ->
 
     Returns:
         target.
+
+    Raises:
+        ValueError: for an index the parser cannot represent, e.g. "a[0,1]".
     """
     parts = _splitter(separators).split(symbol)
     node = target
     for part in parts[:-1]:
-        name, index = _split_index(part)
+        name, index = _split_index(part, symbol)
         if index is None:
             child = node.get(name)
             if not isinstance(child, dict):
@@ -74,7 +90,7 @@ def nest_symbol(target: dict, symbol: str, value: Any, separators: str = ".") ->
                 child = items[index] = {}
         node = child
 
-    name, index = _split_index(parts[-1])
+    name, index = _split_index(parts[-1], symbol)
     if index is None:
         node[name] = value
     else:

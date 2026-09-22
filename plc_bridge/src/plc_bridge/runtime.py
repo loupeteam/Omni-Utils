@@ -27,10 +27,40 @@ CONNECTING = "Connecting"
 CONNECTED = "Connected"
 DISCONNECTED = "Disconnected"
 
-# How long stop() waits for a worker to notice that it should stop.
+# How long stop() waits, in total, for the workers to notice that they should stop.
 JOIN_TIMEOUT_SEC = 2.0
 # How long the read loop idles between checks while disabled or disconnected.
+# enabled = True and reconnect() cut the wait short.
 IDLE_SEC = 1.0
+
+
+class _Run:
+    """
+    One start()..stop() of the worker threads. Each run has its own stop and
+    wake events: a worker from an earlier run that outlived stop() (stuck in a
+    driver call) still sees *its* stop set after a later start(), so it exits
+    instead of polling next to the new pair.
+    """
+
+    def __init__(self, name: str, read_target, write_target):
+        self.stop = threading.Event()
+        self.wake = threading.Event()
+        self.threads = [
+            threading.Thread(target=read_target, args=(self,), name=f"{name}-read", daemon=True),
+            threading.Thread(target=write_target, args=(self,), name=f"{name}-write", daemon=True),
+        ]
+
+    def wait(self, timeout: float) -> bool:
+        """
+        Sleep up to `timeout` seconds; return early when woken or stopped.
+
+        Returns:
+            True when the run should end.
+        """
+        if timeout > 0:
+            self.wake.wait(timeout)
+        self.wake.clear()
+        return self.stop.is_set()
 
 
 class PlcRuntime:
@@ -38,8 +68,8 @@ class PlcRuntime:
     Polls one PLC through a PlcDriver and reports what it reads.
 
     A read thread connects, reads the variable list every `refresh_ms` and emits
-    the result; a write thread flushes queued writes. Both are daemons and both
-    stop within JOIN_TIMEOUT_SEC of stop().
+    the result; a write thread flushes queued writes. Both are daemons, and
+    stop() returns within JOIN_TIMEOUT_SEC whether or not they have.
 
     Listeners are called **on the worker threads**. A host with a main thread
     (a UI, Omniverse Kit) has to marshal to it itself. A listener that raises is
@@ -77,16 +107,15 @@ class PlcRuntime:
         # the set changes rather than on every scan.
         self._failed_symbols = frozenset()
 
-        self._stop = threading.Event()
-        self._stop.set()
-        self._threads = []
+        self._run = None
+        self._run_lock = threading.Lock()
 
     # region - Properties
 
     name = property(lambda self: self._name)
     driver = property(lambda self: self._driver)
     is_connected = property(lambda self: self._is_connected)
-    is_running = property(lambda self: not self._stop.is_set())
+    is_running = property(lambda self: self._run is not None)
 
     @property
     def enabled(self) -> bool:
@@ -96,6 +125,7 @@ class PlcRuntime:
     def enabled(self, value: bool):
         self._enabled = value
         self._emit(EVENT_ENABLED, value)
+        self._wake()
 
     # endregion
     # region - Read list
@@ -183,37 +213,46 @@ class PlcRuntime:
 
     def start(self):
         """Start the worker threads. Does nothing when already running."""
-        if self.is_running:
-            return
-        self._stop.clear()
-        # Daemons, so a host that never reaches stop() (a fast shutdown, a script
-        # that just exits) is not kept alive by these loops.
-        self._threads = [
-            threading.Thread(target=self._read_loop, name=f"{self._name}-read", daemon=True),
-            threading.Thread(target=self._write_loop, name=f"{self._name}-write", daemon=True),
-        ]
-        for thread in self._threads:
-            thread.start()
+        with self._run_lock:
+            if self._run is not None:
+                return
+            # Daemons, so a host that never reaches stop() (a fast shutdown, a
+            # script that just exits) is not kept alive by these loops.
+            self._run = run = _Run(self._name, self._read_loop, self._write_loop)
+            for thread in run.threads:
+                thread.start()
 
     def stop(self):
         """
-        Stop the worker threads and disconnect. The join is bounded: a worker can
-        be inside a read that takes seconds when the PLC has gone away, and the
-        caller is often a UI thread.
+        Stop the worker threads and disconnect. Returns within JOIN_TIMEOUT_SEC
+        in total: a worker can be inside a driver call that takes seconds when
+        the PLC has gone away, and the caller is often a UI thread. A worker
+        that outlives the join exits on its own when the driver call returns.
         """
-        self._stop.set()
-        for thread in self._threads:
+        with self._run_lock:
+            run, self._run = self._run, None
+        if run is None:
+            return
+        run.stop.set()
+        run.wake.set()
+        deadline = time.monotonic() + JOIN_TIMEOUT_SEC
+        for thread in run.threads:
             if thread is threading.current_thread():
                 continue
-            thread.join(timeout=JOIN_TIMEOUT_SEC)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning("%s did not stop within %.0fs; leaving it to the daemon flag",
                                thread.name, JOIN_TIMEOUT_SEC)
-        self._threads = []
 
     def reconnect(self):
         """Drop the connection and open it again on the next scan, e.g. after the address changed."""
         self._reconnect = True
+        self._wake()
+
+    def _wake(self):
+        run = self._run
+        if run is not None:
+            run.wake.set()
 
     # endregion
     # region - Scans
@@ -225,13 +264,14 @@ class PlcRuntime:
         Connect or disconnect as `enabled` asks, then read once and emit.
 
         Returns:
-            True when a read was attempted, False when idle (disabled or not connected).
+            True when the runtime is active (connected and enabled), False when
+            idle, so a scheduler can slow down.
         """
-        if self._reconnect and self._is_connected:
-            self._reconnect = False
-            self._is_connected = False
-            self._driver.disconnect()
-        self._reconnect = False
+        # Read-and-clear in one step: a reconnect() that lands during the scan is
+        # kept for the next one instead of being cleared unseen.
+        wanted, self._reconnect = self._reconnect, False
+        if wanted and self._is_connected:
+            self._drop_connection()
 
         if self._enabled and not self._is_connected:
             self._emit(EVENT_CONNECTION, CONNECTING)
@@ -247,10 +287,7 @@ class PlcRuntime:
                 self._emit(EVENT_CONNECTION, CONNECTED)
 
         if not self._enabled and self._is_connected:
-            # Clear the flag first: the write thread checks it before using the
-            # connection that disconnect() is about to close.
-            self._is_connected = False
-            self._driver.disconnect()
+            self._drop_connection()
 
         if not self._is_connected and self._was_connected:
             self._emit(EVENT_CONNECTION, DISCONNECTED)
@@ -259,14 +296,20 @@ class PlcRuntime:
         if not self._is_connected or not self._enabled:
             return False
 
+        symbols = self.read_variables
+        if not symbols:
+            return True  # nothing to ask for; no round trip
+
         try:
-            result = self._driver.read(self.read_variables)
+            result = self._driver.read(symbols)
+            data = nest(result.values, self._driver.symbol_separators) if result.values else None
         except Exception as e:
             self._emit(EVENT_STATUS, f"Error Reading: {e}")
+            self._check_transport()
             return True
 
-        if result.values:
-            self._emit(EVENT_DATA, nest(result.values, self._driver.symbol_separators))
+        if data:
+            self._emit(EVENT_DATA, data)
         elif result.errors:
             # Every symbol failed: the PLC has no program, or has gone away
             self._emit(EVENT_STATUS, "Error Reading: all {} symbol(s) failed".format(len(result.errors)))
@@ -285,11 +328,39 @@ class PlcRuntime:
         with self._write_lock:
             values, self._write_queue = self._write_queue, {}
         try:
-            self._driver.write(values)
+            errors = self._driver.write(values) or {}
         except Exception as e:
             self._emit(EVENT_STATUS, f"Error Writing: {e}")
+            self._check_transport()
             return False
+        if errors:
+            self._emit(EVENT_STATUS, "Error Writing: " + "; ".join(
+                f"{name}: {text}" for name, text in sorted(errors.items())))
         return True
+
+    def _drop_connection(self):
+        # Clear the flag first: the write thread checks it before using the
+        # connection that disconnect() is about to close.
+        self._is_connected = False
+        self._driver.disconnect()
+        # Report it here, not on the next scan: that scan may reconnect first
+        # (enabled and not connected), and DISCONNECTED would never be seen.
+        if self._was_connected:
+            self._emit(EVENT_CONNECTION, DISCONNECTED)
+            self._was_connected = False
+
+    def _check_transport(self):
+        """
+        After a failed read or write, ask the driver whether the connection is
+        still there. If not, the next scan reports DISCONNECTED and reconnects
+        instead of failing every scan until someone toggles `enabled`.
+        """
+        try:
+            alive = self._driver.is_connected()
+        except Exception:
+            alive = False
+        if not alive:
+            self._drop_connection()
 
     def _report_failed_symbols(self, errors: dict):
         """Emit once when symbols start failing and once when they recover."""
@@ -306,14 +377,14 @@ class PlcRuntime:
     # endregion
     # region - Worker threads
 
-    def _read_loop(self):
+    def _read_loop(self, run: _Run):
         next_scan = time.monotonic()
-        while not self._stop.is_set():
+        while not run.stop.is_set():
             # Hold the refresh period from scan start to scan start. When a scan
             # overran, start the next one now rather than trying to catch up.
             now = time.monotonic()
             next_scan = max(next_scan, now)
-            if self._stop.wait(next_scan - now):
+            if run.wait(next_scan - now):
                 break
             next_scan += self.refresh_ms / 1000
 
@@ -325,11 +396,13 @@ class PlcRuntime:
             if not active:
                 next_scan = time.monotonic() + IDLE_SEC
 
-        self._is_connected = False
-        self._driver.disconnect()
+        # Only the current run owns the connection: a worker that outlived its
+        # stop() must not close what a later start() opened.
+        if self._run is None:
+            self._drop_connection()
 
-    def _write_loop(self):
-        while not self._stop.wait(self.write_sleep):
+    def _write_loop(self, run: _Run):
+        while not run.stop.wait(self.write_sleep):
             try:
                 self.scan_write()
             except Exception:

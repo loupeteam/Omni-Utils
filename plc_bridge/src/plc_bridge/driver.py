@@ -37,19 +37,30 @@ class PlcDriver(ABC):
     Rules every implementation follows, so that drivers can be swapped:
 
     * **Synchronous.** Every method blocks until done. A driver built on an
-      async transport owns its event loop and hides it.
+      async transport owns its event loop (on a thread of its own) and hides
+      it, e.g. `asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)`.
+    * **Bounded.** Every method returns or raises within a timeout the driver
+      chooses, a few seconds at most. The runtime's stop() only waits
+      JOIN_TIMEOUT_SEC for a call in flight; a call that can block longer (a
+      websocket `recv` on a half-open connection can wait for the ping timeout)
+      must carry its own timeout. `disconnect()` must also unblock a `read` or
+      `write` that is in flight on another thread.
     * **Two caller threads.** The runtime calls `read` from its read thread and
       `write` from its write thread, possibly at the same moment. `connect` and
-      `disconnect` are only called from the read thread. The driver makes that
-      safe itself (separate connections, a lock, whatever suits the transport).
-    * **Stateless about the read list.** The symbols arrive with each `read`.
-    * **Failures.** A symbol the PLC rejects goes into `ReadResult.errors`. A
-      failure of the connection or the whole request raises; the runtime reports
-      it and keeps polling.
+      `disconnect` are called from the read thread, and `disconnect` also from
+      whichever thread calls stop(). The driver makes that safe itself
+      (separate connections, a lock, whatever suits the transport).
+    * **Stateless about the read list.** The symbols arrive with each `read`;
+      the runtime never calls `read` with an empty list.
+    * **Failures.** A symbol the PLC rejects goes into `ReadResult.errors` or
+      the dict returned by `write`. A failure of the connection or the whole
+      request raises; the runtime reports it, asks `is_connected()`, and either
+      keeps polling or reconnects.
     """
 
     #: Characters that separate the parts of a symbol name for this vendor.
     #: Beckhoff "GVL.struct.member" -> "."; B&R "Program:struct.member" -> ":.".
+    #: Must not be empty.
     symbol_separators: str = "."
 
     @abstractmethod
@@ -58,16 +69,30 @@ class PlcDriver(ABC):
 
     @abstractmethod
     def disconnect(self) -> None:
-        """Close the connection. Safe to call when not connected; never raises."""
+        """
+        Close the connection and unblock any call in flight. Safe to call when
+        not connected, and from a thread other than the one reading; never raises.
+        """
 
     @abstractmethod
     def is_connected(self) -> bool:
-        """True while the connection is open."""
+        """
+        True while the transport is open. Must reflect a connection the peer
+        dropped (the runtime asks after a failed read or write to decide
+        whether to reconnect), be cheap, and be safe to call from any thread.
+        """
 
     @abstractmethod
     def read(self, symbols: Sequence[str]) -> ReadResult:
-        """Read the symbols in one request. An empty list returns an empty result."""
+        """Read the symbols in one request. Never called with an empty list."""
 
     @abstractmethod
-    def write(self, values: Mapping[str, Any]) -> None:
-        """Write flat symbol name -> value in one request."""
+    def write(self, values: Mapping[str, Any]) -> Mapping[str, str]:
+        """
+        Write flat symbol name -> value in one request.
+
+        Returns:
+            symbol name -> reason for each symbol the PLC rejected; empty (or
+            None) when every write succeeded. Raise only when the whole request
+            failed.
+        """
