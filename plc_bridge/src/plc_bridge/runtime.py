@@ -120,8 +120,10 @@ class PlcRuntime:
         # that is waiting on a stuck worker waits for it to finish instead of
         # having its fresh connection closed by that stop(). Re-entrant, so a
         # listener that calls start() or stop() from inside one does not
-        # deadlock; no event is emitted while it is held, so a listener that
-        # waits on another thread cannot deadlock either.
+        # deadlock. stop() itself emits nothing while holding it, and the
+        # worker it joins emits no DISCONNECTED on its way out (stop() reports
+        # that afterwards), so a DISCONNECTED listener that restarts neither
+        # deadlocks nor stalls the stop() for the join timeout.
         self._lifecycle_lock = threading.RLock()
         # Serialises the connection state changes (drop, connected) between the
         # read thread, a stop() on another thread, and a worker on its way out.
@@ -484,12 +486,16 @@ class PlcRuntime:
             if not active:
                 next_scan = time.monotonic() + IDLE_SEC
 
-        # Only the current run owns the connection: a worker that outlived its
-        # stop() must not close what a later start() opened. (stop() also drops
-        # the connection itself, so this only matters for a stop() called from
-        # a listener on this thread.)
-        if self._run is None:
-            self._drop_connection()
+        # Close the connection on the way out, but do not report it: stop() does
+        # that after its join, outside the lifecycle lock, so a DISCONNECTED
+        # listener may call start() without waiting on the joiner. The check and
+        # the close are one step under the lock: a worker that outlived its
+        # stop() must not close what a later start() opened, and a new run can
+        # only own a connection once _run is set.
+        with self._connection_lock:
+            if self._run is None:
+                self._is_connected = False
+                self._driver.disconnect()
 
     def _write_loop(self, run: _Run):
         while not run.stop.wait(self.write_sleep):

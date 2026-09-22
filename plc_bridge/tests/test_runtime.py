@@ -664,3 +664,39 @@ def test_stop_from_a_read_thread_listener_then_another_listener_stop(driver):
     # the runtime is usable again afterwards
     plc.start()
     plc.stop()
+
+
+def test_disconnected_listener_restart_does_not_stall_a_normal_stop(driver, monkeypatch):
+    """
+    The common case: nothing is stuck. stop() joins the read thread; the
+    DISCONNECTED it reports afterwards may trigger a start() in a listener,
+    and stop() must not have waited the join timeout for that.
+    """
+    import plc_bridge.runtime as rt
+    monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 1.0)
+    plc = PlcRuntime(driver, name="N", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    rec = Recorder(plc)
+    restarted = []
+
+    def on_connection(state):
+        if state == DISCONNECTED and not restarted:
+            restarted.append(threading.current_thread().name)
+            plc.start()
+
+    plc.on_connection(on_connection)
+    plc.start()
+    deadline = time.monotonic() + 2
+    while not plc.is_connected and time.monotonic() < deadline:
+        time.sleep(0.005)
+    started = time.monotonic()
+    plc.stop()
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.5, elapsed
+    assert restarted == [threading.current_thread().name]  # reported by stop(), on its thread
+    deadline = time.monotonic() + 1
+    while rec.connection.count(CONNECTED) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
+    plc.stop()
+    assert rec.connection.count(DISCONNECTED) == 2
