@@ -32,6 +32,9 @@ JOIN_TIMEOUT_SEC = 2.0
 # How long the read loop idles between checks while disabled or disconnected.
 # enabled = True and reconnect() cut the wait short.
 IDLE_SEC = 1.0
+# An unchanged read problem is repeated at this interval, so a status display
+# that expires old entries (the bridge UI drops them after 3 s) keeps showing it.
+PROBLEM_REPEAT_SEC = 2.0
 
 
 class _Run:
@@ -107,9 +110,19 @@ class PlcRuntime:
         # symbols), so a status is emitted when it changes rather than on every
         # scan, and "Reading OK" once when it clears.
         self._read_problem = None
+        self._read_problem_at = 0.0
+        # Set by the write thread when a write failed and the driver says the
+        # transport is gone; the read thread verifies and acts on it.
+        self._transport_suspect = False
 
         self._run = None
-        self._run_lock = threading.Lock()
+        # Held for the whole of start() and stop(), so a start() during a stop()
+        # that is waiting on a stuck worker waits for it to finish instead of
+        # having its fresh connection closed by that stop().
+        self._lifecycle_lock = threading.Lock()
+        # Serialises the connection state changes (drop, connected) between the
+        # read thread, a stop() on another thread, and a worker on its way out.
+        self._connection_lock = threading.Lock()
 
     # region - Properties
 
@@ -214,7 +227,7 @@ class PlcRuntime:
 
     def start(self):
         """Start the worker threads. Does nothing when already running."""
-        with self._run_lock:
+        with self._lifecycle_lock:
             if self._run is not None:
                 return
             # Daemons, so a host that never reaches stop() (a fast shutdown, a
@@ -230,25 +243,26 @@ class PlcRuntime:
         the PLC has gone away, and the caller is often a UI thread. A worker
         that outlives the join exits on its own when the driver call returns.
         """
-        with self._run_lock:
+        with self._lifecycle_lock:
             run, self._run = self._run, None
-        if run is None:
-            return
-        run.stop.set()
-        run.wake.set()
-        deadline = time.monotonic() + JOIN_TIMEOUT_SEC
-        for thread in run.threads:
-            if thread is threading.current_thread():
-                continue
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            if thread.is_alive():
-                logger.warning("%s did not stop within %.0fs; leaving it to the daemon flag",
-                               thread.name, JOIN_TIMEOUT_SEC)
-        # Close the connection from here too. The read thread does it on its way
-        # out, but if it is stuck inside a driver call this is what unblocks it
-        # (the contract asks disconnect() to do that) and what guarantees the
-        # PLC link is closed when stop() returns. disconnect() is idempotent.
-        self._drop_connection()
+            if run is None:
+                return
+            run.stop.set()
+            run.wake.set()
+            deadline = time.monotonic() + JOIN_TIMEOUT_SEC
+            for thread in run.threads:
+                if thread is threading.current_thread():
+                    continue
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    logger.warning("%s did not stop within %.0fs; leaving it to the daemon flag",
+                                   thread.name, JOIN_TIMEOUT_SEC)
+            # Close the connection from here too. The read thread does it on its
+            # way out, but if it is stuck inside a driver call this is what
+            # unblocks it (the contract asks disconnect() to do that) and what
+            # guarantees the PLC link is closed when stop() returns.
+            # disconnect() is idempotent.
+            self._drop_connection()
 
     def reconnect(self):
         """Drop the connection and open it again on the next scan, e.g. after the address changed."""
@@ -298,6 +312,11 @@ class PlcRuntime:
         wanted, self._reconnect = self._reconnect, False
         if wanted and self._is_connected:
             self._drop_connection()
+        # The write thread saw the transport go: ask the driver again from here
+        # before acting, since the link may have been reopened since.
+        suspect, self._transport_suspect = self._transport_suspect, False
+        if suspect and self._is_connected:
+            self._check_transport()
 
         if self._enabled and not self._is_connected:
             self._emit(EVENT_CONNECTION, CONNECTING)
@@ -313,8 +332,10 @@ class PlcRuntime:
             else:
                 if self._superseded(run):
                     return False
-                self._is_connected = True
-                self._was_connected = True
+                with self._connection_lock:
+                    self._is_connected = True
+                    self._was_connected = True
+                self._transport_suspect = False
                 self._emit(EVENT_CONNECTION, CONNECTED)
 
         if not self._enabled and self._is_connected:
@@ -364,10 +385,12 @@ class PlcRuntime:
             if self._superseded(run):
                 return False
             self._emit(EVENT_STATUS, f"Error Writing: {e}")
-            # The write thread never touches the connection itself: it asks the
-            # read thread to drop and reopen it, so the two never race on it.
+            # The write thread never touches the connection itself: it flags the
+            # transport for the read thread, which checks again and reconnects
+            # only if the link really is gone (it may have been reopened by then).
             if not self._transport_alive():
-                self.reconnect()
+                self._transport_suspect = True
+                self._wake()
             return False
         if self._superseded(run):
             return False
@@ -377,14 +400,17 @@ class PlcRuntime:
         return True
 
     def _drop_connection(self):
-        # Clear the flag first: the write thread checks it before using the
-        # connection that disconnect() is about to close.
-        self._is_connected = False
-        self._driver.disconnect()
-        # Report it here, not on the next scan: that scan may reconnect first
-        # (enabled and not connected), and DISCONNECTED would never be seen.
-        if self._was_connected:
-            self._was_connected = False
+        # Under the lock: stop() on another thread and a worker on its exit path
+        # can both get here, and DISCONNECTED must be reported exactly once.
+        with self._connection_lock:
+            # Clear the flag first: the write thread checks it before using the
+            # connection that disconnect() is about to close.
+            self._is_connected = False
+            self._driver.disconnect()
+            # Report it here, not on the next scan: that scan may reconnect first
+            # (enabled and not connected), and DISCONNECTED would never be seen.
+            report, self._was_connected = self._was_connected, False
+        if report:
             self._emit(EVENT_CONNECTION, DISCONNECTED)
 
     def _transport_alive(self) -> bool:
@@ -405,14 +431,19 @@ class PlcRuntime:
 
     def _set_read_problem(self, text):
         """
-        Emit a read problem once, when it changes, and "Reading OK" once when
-        it clears. A problem that repeats every scan (a symbol the PLC rejects,
-        a name the parser cannot index) would otherwise flood the listeners at
-        the scan rate.
+        Emit a read problem when it changes, then again every PROBLEM_REPEAT_SEC
+        while it persists, and "Reading OK" once when it clears. A problem that
+        repeats every scan (a symbol the PLC rejects, a name the parser cannot
+        index) would otherwise flood the listeners at the scan rate; never
+        repeating it would let a status display that expires entries go blank
+        while the problem is still there.
         """
+        now = time.monotonic()
         if text == self._read_problem:
-            return
+            if text is None or now - self._read_problem_at < PROBLEM_REPEAT_SEC:
+                return
         self._read_problem = text
+        self._read_problem_at = now
         self._emit(EVENT_STATUS, text if text else "Reading OK")
 
     # endregion

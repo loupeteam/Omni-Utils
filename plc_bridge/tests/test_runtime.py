@@ -304,6 +304,22 @@ def test_unrepresentable_symbol_is_a_status_at_full_rate(plc, driver):
     assert rec.status[-1] == "Reading OK"
 
 
+def test_a_persistent_read_problem_is_repeated_slowly(plc, driver, monkeypatch):
+    import plc_bridge.runtime as rt
+    rec = Recorder(plc)
+    driver.read_error = RuntimeError("boom")
+    plc.scan_read()
+    plc.scan_read()
+    assert rec.status == ["Error Reading: boom"]
+    monkeypatch.setattr(rt, "PROBLEM_REPEAT_SEC", 0.0)  # "two seconds have passed"
+    plc.scan_read()
+    assert rec.status == ["Error Reading: boom"] * 2
+    driver.read_error = None
+    plc.scan_read()
+    plc.scan_read()
+    assert rec.status == ["Error Reading: boom"] * 2 + ["Reading OK"]  # OK is never repeated
+
+
 def test_dropped_transport_is_detected_and_reconnected(plc, driver):
     rec = Recorder(plc)
     plc.scan_read()
@@ -335,10 +351,25 @@ def test_write_error_with_dead_transport_asks_the_read_thread_to_reconnect(plc, 
     plc.scan_write()
     # the write thread does not touch the connection itself...
     assert plc.is_connected and driver.disconnects == 1
-    # ...the read thread drops and reopens it on its next scan
+    # ...the read thread checks and, the link being gone, drops and reopens it
     driver.write_error = None
     plc.scan_read()
     assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
+
+
+def test_write_thread_suspicion_is_verified_not_trusted(plc, driver):
+    """The link died under a write but the read thread already reopened it."""
+    rec = Recorder(plc)
+    plc.scan_read()
+    driver.connected = False
+    driver.write_error = ConnectionError("gone")
+    plc.queue_write("GVL.a", 1)
+    plc.scan_write()
+    driver.connected = True  # recovered before the read thread looked
+    driver.write_error = None
+    plc.scan_read()
+    assert rec.connection == [CONNECTING, CONNECTED]
+    assert driver.connects == 1
 
 
 def test_write_error_with_live_transport_keeps_the_connection(plc, driver):
@@ -519,3 +550,44 @@ def test_a_superseded_worker_cannot_touch_the_new_run(driver, monkeypatch):
     assert "Error Reading: closed under me" not in rec.status
     assert rec.connection.count(DISCONNECTED) == 2  # one per stop(), none from the zombie
     assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTED]
+
+
+def test_start_during_a_stop_waiting_on_a_stuck_worker(driver, monkeypatch):
+    """
+    stop() is blocked in its join by a read stuck in the driver. A start() in
+    that window must wait for the stop() to finish, so the stop()'s final
+    disconnect cannot close the connection the new run opens.
+    """
+    import plc_bridge.runtime as rt
+    monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.3)
+    release = threading.Event()
+    calls = []
+
+    def stuck_read(symbols):
+        calls.append(1)
+        release.wait(5)
+        return ReadResult(values={"GVL.a": 1})
+
+    driver.read = stuck_read
+    plc = PlcRuntime(driver, name="D", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    rec = Recorder(plc)
+    plc.start()
+    while not calls:
+        time.sleep(0.005)
+    stopper = threading.Thread(target=plc.stop)
+    stopper.start()
+    time.sleep(0.05)  # stop() is now inside its join
+    driver.read = lambda symbols: ReadResult(values={"GVL.a": 2})
+    started = time.monotonic()
+    plc.start()  # waits for stop() to finish
+    assert time.monotonic() - started > 0.15
+    stopper.join(2)
+    release.set()
+    deadline = time.monotonic() + 1
+    while rec.connection.count(CONNECTED) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.1)
+    assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
+    assert plc.is_connected and driver.connected
+    plc.stop()
