@@ -700,3 +700,29 @@ def test_disconnected_listener_restart_does_not_stall_a_normal_stop(driver, monk
     assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
     plc.stop()
     assert rec.connection.count(DISCONNECTED) == 2
+
+
+def test_a_bad_refresh_value_does_not_kill_the_read_thread(driver, caplog):
+    """
+    A prim attribute with no value reaches the runtime as None. The read loop
+    must survive it (logging), keep honouring stop(), and resume when fixed.
+    """
+    import logging
+    plc = PlcRuntime(driver, name="F", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    got = threading.Event()
+    plc.on_data(lambda d: got.set())
+    plc.start()
+    assert got.wait(2)
+    with caplog.at_level(logging.ERROR, logger="plc_bridge.runtime"):
+        plc.refresh_ms = None
+        time.sleep(0.1)
+        assert [t.name for t in threading.enumerate() if t.name == "F-read"]
+        assert "read scan failed" in caplog.text
+    got.clear()
+    plc.refresh_ms = 5
+    plc.reconnect()  # wakes the idle loop
+    assert got.wait(2)
+    plc.stop()
+    assert not driver.connected and not plc.is_connected
+    assert not [t for t in threading.enumerate() if t.name.startswith("F-")]

@@ -339,9 +339,12 @@ class PlcRuntime:
                 self._is_connected = False
                 self._emit(EVENT_STATUS, f"Error Connecting: {e}")
             else:
-                if self._superseded(run):
-                    return False
+                # The check and the state change are one step under the lock: a
+                # stop() that gives up on us between them would report nothing,
+                # and this CONNECTED would never get its DISCONNECTED.
                 with self._connection_lock:
+                    if self._superseded(run):
+                        return False
                     self._is_connected = True
                     self._was_connected = True
                 self._transport_suspect = False
@@ -371,6 +374,8 @@ class PlcRuntime:
 
         if data:
             self._emit(EVENT_DATA, data)
+            if self._superseded(run):  # a data listener may have called stop()
+                return False
         if result.errors:
             detail = "; ".join(f"{name}: {text}" for name, text in sorted(result.errors.items()))
             if data:
@@ -468,6 +473,12 @@ class PlcRuntime:
     # region - Worker threads
 
     def _read_loop(self, run: _Run):
+        try:
+            self._read_loop_body(run)
+        finally:
+            self._read_loop_exit()
+
+    def _read_loop_body(self, run: _Run):
         next_scan = time.monotonic()
         while not run.stop.is_set():
             # Hold the refresh period from scan start to scan start. When a scan
@@ -476,9 +487,12 @@ class PlcRuntime:
             next_scan = max(next_scan, now)
             if run.wait(next_scan - now):
                 break
-            next_scan += self.refresh_ms / 1000
 
+            # Nothing in here may end the thread: a bad refresh_ms (None from an
+            # unset prim attribute, say) is logged and treated as idle, and the
+            # loop keeps going so that enabled / stop() still work.
             try:
+                next_scan += float(self.refresh_ms) / 1000
                 active = self._scan_read(run)
             except Exception:
                 logger.exception("%s: read scan failed", self._name)
@@ -486,6 +500,7 @@ class PlcRuntime:
             if not active:
                 next_scan = time.monotonic() + IDLE_SEC
 
+    def _read_loop_exit(self):
         # Close the connection on the way out, but do not report it: stop() does
         # that after its join, outside the lifecycle lock, so a DISCONNECTED
         # listener may call start() without waiting on the joiner. The check and
@@ -495,7 +510,10 @@ class PlcRuntime:
         with self._connection_lock:
             if self._run is None:
                 self._is_connected = False
-                self._driver.disconnect()
+                try:
+                    self._driver.disconnect()
+                except Exception:
+                    logger.exception("%s: disconnect on exit failed", self._name)
 
     def _write_loop(self, run: _Run):
         while not run.stop.wait(self.write_sleep):
