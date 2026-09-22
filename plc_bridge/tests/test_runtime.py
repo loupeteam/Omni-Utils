@@ -591,3 +591,76 @@ def test_start_during_a_stop_waiting_on_a_stuck_worker(driver, monkeypatch):
     assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
     assert plc.is_connected and driver.connected
     plc.stop()
+
+
+def test_disconnected_listener_may_restart_from_a_stuck_stop(driver, monkeypatch):
+    """
+    stop() gives up on a read stuck in the driver and reports DISCONNECTED
+    itself. A listener that reacts by calling start() (auto-restart) or stop()
+    must not deadlock on the lifecycle lock.
+    """
+    import plc_bridge.runtime as rt
+    monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.2)
+    release = threading.Event()
+    calls = []
+
+    def stuck_read(symbols):
+        calls.append(1)
+        release.wait(5)
+        return ReadResult(values={"GVL.a": 1})
+
+    driver.read = stuck_read
+    plc = PlcRuntime(driver, name="R", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    restarted = []
+
+    def on_connection(state):
+        if state == DISCONNECTED and not restarted:
+            restarted.append(1)
+            plc.stop()   # nested stop: nothing to do
+            plc.start()  # auto-restart
+
+    plc.on_connection(on_connection)
+    plc.start()
+    while not calls:
+        time.sleep(0.005)
+    started = time.monotonic()
+    plc.stop()
+    assert time.monotonic() - started < 1
+    assert restarted and plc.is_running
+    driver.read = lambda symbols: ReadResult(values={"GVL.a": 2})
+    release.set()
+    deadline = time.monotonic() + 1
+    while not plc.is_connected and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert plc.is_connected
+    plc.stop()
+
+
+def test_stop_from_a_read_thread_listener_then_another_listener_stop(driver):
+    """
+    A listener on the read thread calls stop(); that stop() reports
+    DISCONNECTED on the read thread; a second listener calls stop() again.
+    Neither may block the read thread, which must then exit.
+    """
+    plc = PlcRuntime(driver, name="L", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    seen = []
+
+    def stop_on_data(data):
+        seen.append(data)
+        plc.stop()
+
+    plc.on_data(stop_on_data)
+    plc.on_connection(lambda s: plc.stop() if s == DISCONNECTED else None)
+    plc.start()
+    deadline = time.monotonic() + 2
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.1)
+    assert seen and not plc.is_running
+    assert not [t for t in threading.enumerate() if t.name.startswith("L-")]
+    assert not driver.connected
+    # the runtime is usable again afterwards
+    plc.start()
+    plc.stop()

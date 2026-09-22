@@ -73,8 +73,10 @@ class PlcDriver(ABC):
     def disconnect(self) -> None:
         """
         Close the connection and unblock any call in flight. Safe to call when
-        not connected, and from a thread other than the one reading; never
-        raises. The runtime serialises its own disconnect() calls.
+        not connected, and from a thread other than the one reading, including
+        while a `connect` is in progress on the read thread (a worker the
+        runtime gave up on may still be inside `connect` when stop() closes
+        the link); never raises.
         """
 
     @abstractmethod

@@ -118,8 +118,11 @@ class PlcRuntime:
         self._run = None
         # Held for the whole of start() and stop(), so a start() during a stop()
         # that is waiting on a stuck worker waits for it to finish instead of
-        # having its fresh connection closed by that stop().
-        self._lifecycle_lock = threading.Lock()
+        # having its fresh connection closed by that stop(). Re-entrant, so a
+        # listener that calls start() or stop() from inside one does not
+        # deadlock; no event is emitted while it is held, so a listener that
+        # waits on another thread cannot deadlock either.
+        self._lifecycle_lock = threading.RLock()
         # Serialises the connection state changes (drop, connected) between the
         # read thread, a stop() on another thread, and a worker on its way out.
         self._connection_lock = threading.Lock()
@@ -262,7 +265,10 @@ class PlcRuntime:
             # unblocks it (the contract asks disconnect() to do that) and what
             # guarantees the PLC link is closed when stop() returns.
             # disconnect() is idempotent.
-            self._drop_connection()
+            report = self._close_connection()
+        # Outside the lock: a DISCONNECTED listener may call start() or stop().
+        if report:
+            self._emit(EVENT_CONNECTION, DISCONNECTED)
 
     def reconnect(self):
         """Drop the connection and open it again on the next scan, e.g. after the address changed."""
@@ -322,7 +328,8 @@ class PlcRuntime:
             self._emit(EVENT_CONNECTION, CONNECTING)
             try:
                 # Close anything left from a previous connection first
-                self._driver.disconnect()
+                with self._connection_lock:
+                    self._driver.disconnect()
                 self._driver.connect()
             except Exception as e:
                 if self._superseded(run):
@@ -399,18 +406,27 @@ class PlcRuntime:
                 f"{name}: {text}" for name, text in sorted(errors.items())))
         return True
 
-    def _drop_connection(self):
-        # Under the lock: stop() on another thread and a worker on its exit path
-        # can both get here, and DISCONNECTED must be reported exactly once.
+    def _close_connection(self) -> bool:
+        """
+        Close the connection and clear the state. Under the lock: stop() on
+        another thread and a worker on its exit path can both get here, and
+        DISCONNECTED must be reported exactly once.
+
+        Returns:
+            True when the caller has to emit DISCONNECTED (always outside a lock).
+        """
         with self._connection_lock:
             # Clear the flag first: the write thread checks it before using the
             # connection that disconnect() is about to close.
             self._is_connected = False
             self._driver.disconnect()
-            # Report it here, not on the next scan: that scan may reconnect first
-            # (enabled and not connected), and DISCONNECTED would never be seen.
             report, self._was_connected = self._was_connected, False
-        if report:
+        return report
+
+    def _drop_connection(self):
+        # Report it here, not on the next scan: that scan may reconnect first
+        # (enabled and not connected), and DISCONNECTED would never be seen.
+        if self._close_connection():
             self._emit(EVENT_CONNECTION, DISCONNECTED)
 
     def _transport_alive(self) -> bool:
