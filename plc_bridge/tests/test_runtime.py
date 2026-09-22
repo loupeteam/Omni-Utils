@@ -905,3 +905,19 @@ def test_a_real_wake_rebases_the_schedule(driver, monkeypatch):
     plc._read_loop_body(run)
     # after the wake at +5 ms the next scan is a full period later, not 15 ms
     assert [round(w, 3) for w in run.waits] == [0.0, 0.02, 0.02, 0.02]
+
+
+def test_reassigning_an_unchanged_value_emits_but_does_not_wake(driver):
+    plc = PlcRuntime(driver, name="U", enabled=True, refresh_ms=100)
+    plc.set_read_variables(["GVL.a"])
+    rec = Recorder(plc)
+    plc.start()
+    assert _wait_for_reads(driver, 1)
+    before = len(driver.reads)
+    for _ in range(50):
+        plc.enabled = True
+        plc.refresh_ms = 100
+        time.sleep(0.002)
+    assert rec.enabled == [True] * 50          # every assignment is reported...
+    assert len(driver.reads) - before <= 3     # ...but the cadence stays 10 Hz
+    plc.stop()

@@ -147,8 +147,10 @@ class PlcRuntime:
 
     @refresh_ms.setter
     def refresh_ms(self, value):
+        changed = value != self._refresh_ms
         self._refresh_ms = value
-        self._wake()
+        if changed:
+            self._wake()
 
     @property
     def enabled(self) -> bool:
@@ -156,9 +158,15 @@ class PlcRuntime:
 
     @enabled.setter
     def enabled(self, value: bool):
+        # The event goes out on every assignment (hosts re-apply their options
+        # and listen for it); the loop is woken only when the value changed,
+        # so a host that re-applies options at a high rate does not turn the
+        # refresh period into that rate.
+        changed = value != self._enabled
         self._enabled = value
         self._emit(EVENT_ENABLED, value)
-        self._wake()
+        if changed:
+            self._wake()
 
     # endregion
     # region - Read list
