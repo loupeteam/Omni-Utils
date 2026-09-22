@@ -37,7 +37,7 @@ docstring:
 | Rule | Meaning |
 |---|---|
 | Synchronous | Every method blocks. A driver on an async transport (websockets) owns its event loop on a thread of its own and hides it. |
-| Bounded | Every method returns or raises within a timeout the driver chooses, a few seconds at most, and `disconnect` unblocks a call in flight. `stop()` only waits two seconds. |
+| Bounded | Every method returns or raises within a timeout the driver chooses, a few seconds at most, and `disconnect` unblocks a call in flight (or the transport timeout is short enough to stand in for that). `stop()` waits two seconds, then closes the connection itself. |
 | Two caller threads | `read` comes from the read thread, `write` from the write thread, possibly at once. `connect` comes from the read thread; `disconnect` from the read thread or from whoever calls `stop()`. The driver makes that safe: two connections, or a lock. |
 | Stateless read list | The symbols arrive with each `read`, never empty. |
 | Flat in, flat out | `ReadResult.values` is flat symbol name to value. The runtime nests it, so every vendor's data has the same shape. |

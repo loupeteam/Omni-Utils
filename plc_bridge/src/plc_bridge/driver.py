@@ -44,7 +44,9 @@ class PlcDriver(ABC):
       JOIN_TIMEOUT_SEC for a call in flight; a call that can block longer (a
       websocket `recv` on a half-open connection can wait for the ping timeout)
       must carry its own timeout. `disconnect()` must also unblock a `read` or
-      `write` that is in flight on another thread.
+      `write` that is in flight on another thread, or the transport's own
+      timeout must be short enough to stand in for that (ADS cannot unblock a
+      request; the driver sets a one-second ADS timeout instead).
     * **Two caller threads.** The runtime calls `read` from its read thread and
       `write` from its write thread, possibly at the same moment. `connect` and
       `disconnect` are called from the read thread, and `disconnect` also from

@@ -131,19 +131,22 @@ def test_total_failure_emits_no_data(plc, driver):
     driver.values = {}
     driver.errors = {"GVL.a": "symbol not found", "GVL.arr[1]": "symbol not found"}
     plc.scan_read()
+    plc.scan_read()
     assert rec.data == []
-    assert rec.status[0] == "Error Reading: all 2 symbol(s) failed"
-    assert "GVL.a: symbol not found" in rec.status[1]
+    assert rec.status == ["Error Reading: all 2 symbol(s) failed: "
+                          "GVL.a: symbol not found; GVL.arr[1]: symbol not found"]
 
 
 def test_read_exception_is_a_status_and_polling_continues(plc, driver):
     rec = Recorder(plc)
     driver.read_error = RuntimeError("boom")
     assert plc.scan_read() is True
-    assert rec.status == ["Error Reading: boom"]
+    assert plc.scan_read() is True
+    assert rec.status == ["Error Reading: boom"]  # once, not once per scan
     driver.read_error = None
     plc.scan_read()
     assert len(rec.data) == 1
+    assert rec.status[-1] == "Reading OK"
 
 
 def test_reconnect_drops_and_reopens(plc, driver):
@@ -263,7 +266,7 @@ def test_threads_poll_write_and_stop_quickly(plc, driver):
 
 
 def test_stop_is_quick_while_idle(driver):
-    plc = PlcRuntime(driver)  # disabled: the read loop idles for IDLE_SEC at a time
+    plc = PlcRuntime(driver, name="I")  # disabled: the read loop idles for IDLE_SEC at a time
     plc.start()
     time.sleep(0.05)
     started = time.monotonic()
@@ -291,9 +294,14 @@ def test_unrepresentable_symbol_is_a_status_at_full_rate(plc, driver):
     driver.values = {"GVL.a": 1, "GVL.arr2d[0,1]": 2}
     plc.set_read_variables(list(driver.values))
     assert plc.scan_read() is True
+    assert plc.scan_read() is True
     assert rec.data == []
+    # reported once, not once per scan
     assert rec.status == ["Error Reading: cannot index symbol 'GVL.arr2d[0,1]': 'arr2d[0,1]'"]
     assert plc.is_connected
+    plc.set_read_variables(["GVL.a"])
+    plc.scan_read()
+    assert rec.status[-1] == "Reading OK"
 
 
 def test_dropped_transport_is_detected_and_reconnected(plc, driver):
@@ -318,13 +326,28 @@ def test_read_error_with_live_transport_keeps_the_connection(plc, driver):
     assert plc.is_connected and driver.connects == 1
 
 
-def test_write_error_with_dead_transport_drops_the_connection(plc, driver):
+def test_write_error_with_dead_transport_asks_the_read_thread_to_reconnect(plc, driver):
+    rec = Recorder(plc)
     plc.scan_read()
     driver.connected = False
     driver.write_error = ConnectionError("gone")
     plc.queue_write("GVL.a", 1)
     plc.scan_write()
-    assert not plc.is_connected
+    # the write thread does not touch the connection itself...
+    assert plc.is_connected and driver.disconnects == 1
+    # ...the read thread drops and reopens it on its next scan
+    driver.write_error = None
+    plc.scan_read()
+    assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
+
+
+def test_write_error_with_live_transport_keeps_the_connection(plc, driver):
+    plc.scan_read()
+    driver.write_error = RuntimeError("denied")
+    plc.queue_write("GVL.a", 1)
+    plc.scan_write()
+    plc.scan_read()
+    assert driver.connects == 1
 
 
 def test_reconnect_requested_during_a_scan_is_not_lost(plc, driver):
@@ -356,16 +379,21 @@ def test_stop_waits_at_most_the_join_timeout_in_total(driver, monkeypatch):
     release = threading.Event()
     driver.read = lambda symbols: (release.wait(5), ReadResult())[1]
     driver.write = lambda values: (release.wait(5), {})[1]
-    plc = PlcRuntime(driver, name="T", enabled=True)
+    plc = PlcRuntime(driver, name="J", enabled=True)
     plc.set_read_variables(["GVL.a"])
     plc.start()
     plc.queue_write("GVL.a", 1)
     time.sleep(0.1)  # both workers are now inside the driver
+    workers = [t for t in threading.enumerate() if t.name.startswith("J-")]
     started = time.monotonic()
     plc.stop()
     elapsed = time.monotonic() - started
-    release.set()
     assert elapsed < 0.5, elapsed
+    # stop() closed the link from its own thread, without waiting for the workers
+    assert not driver.connected and not plc.is_connected
+    release.set()
+    for t in workers:
+        t.join(1)
 
 
 def test_restart_while_a_worker_is_stuck_leaves_no_zombie(driver, monkeypatch):
@@ -394,7 +422,7 @@ def test_restart_while_a_worker_is_stuck_leaves_no_zombie(driver, monkeypatch):
 
 
 def test_enabled_wakes_an_idle_read_loop(driver):
-    plc = PlcRuntime(driver, refresh_ms=5)  # disabled: the loop idles IDLE_SEC at a time
+    plc = PlcRuntime(driver, name="W", refresh_ms=5)  # disabled: the loop idles IDLE_SEC at a time
     connected = threading.Event()
     plc.on_connection(lambda s: connected.set() if s == CONNECTED else None)
     plc.set_read_variables(["GVL.a"])
@@ -405,6 +433,7 @@ def test_enabled_wakes_an_idle_read_loop(driver):
     assert connected.wait(0.5)
     assert time.monotonic() - started < 0.5
     plc.stop()
+    assert not driver.connected
 
 
 def test_toggling_enabled_while_running(plc, driver):
@@ -454,3 +483,39 @@ def test_listener_removed_from_inside_a_callback(plc):
     assert len(seen) == 1
 
 # endregion
+
+
+def test_a_superseded_worker_cannot_touch_the_new_run(driver, monkeypatch):
+    """
+    stop() gives up on a read thread stuck in the driver; start() opens a new
+    run. When the stuck read returns (failing, since stop() closed the socket
+    under it) it must not report anything or drop the new run's connection.
+    """
+    import plc_bridge.runtime as rt
+    monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.2)
+    release = threading.Event()
+    calls = []
+
+    def stuck_read(symbols):
+        calls.append(1)
+        release.wait(5)
+        raise ConnectionError("closed under me")
+
+    driver.read = stuck_read
+    plc = PlcRuntime(driver, name="S", enabled=True, refresh_ms=5)
+    plc.set_read_variables(["GVL.a"])
+    rec = Recorder(plc)
+    plc.start()
+    while not calls:
+        time.sleep(0.005)
+    plc.stop()
+    driver.read = lambda symbols: (time.sleep(0.05), ReadResult(values={"GVL.a": 1}))[1]
+    driver.connected = False  # what the zombie's _check_transport would see
+    plc.start()
+    time.sleep(0.02)
+    release.set()  # the zombie now raises, mid-connect of the new run
+    time.sleep(0.4)
+    plc.stop()
+    assert "Error Reading: closed under me" not in rec.status
+    assert rec.connection.count(DISCONNECTED) == 2  # one per stop(), none from the zombie
+    assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTED]
