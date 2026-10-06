@@ -277,7 +277,7 @@ def test_stop_is_quick_while_idle(driver):
 def test_start_twice_and_restart(plc):
     plc.start()
     plc.start()
-    assert len([t for t in threading.enumerate() if t.name.startswith("T-")]) == 2
+    assert len([t for t in threading.enumerate() if t.name.startswith("T-")]) == 1
     plc.stop()
     plc.start()
     assert plc.is_running
@@ -342,34 +342,19 @@ def test_read_error_with_live_transport_keeps_the_connection(plc, driver):
     assert plc.is_connected and driver.connects == 1
 
 
-def test_write_error_with_dead_transport_asks_the_read_thread_to_reconnect(plc, driver):
+def test_write_error_with_dead_transport_drops_and_reconnects(plc, driver):
+    """One worker: a write that fails on a dead link drops it, and the read that
+    follows in the same scan reconnects."""
     rec = Recorder(plc)
-    plc.scan_read()
+    plc.scan()
     driver.connected = False
     driver.write_error = ConnectionError("gone")
     plc.queue_write("GVL.a", 1)
-    plc.scan_write()
-    # the write thread does not touch the connection itself...
-    assert plc.is_connected and driver.disconnects == 1
-    # ...the read thread checks and, the link being gone, drops and reopens it
+    assert plc.scan_write() is False
+    assert not plc.is_connected
     driver.write_error = None
-    plc.scan_read()
+    plc.scan()
     assert rec.connection == [CONNECTING, CONNECTED, DISCONNECTED, CONNECTING, CONNECTED]
-
-
-def test_write_thread_suspicion_is_verified_not_trusted(plc, driver):
-    """The link died under a write but the read thread already reopened it."""
-    rec = Recorder(plc)
-    plc.scan_read()
-    driver.connected = False
-    driver.write_error = ConnectionError("gone")
-    plc.queue_write("GVL.a", 1)
-    plc.scan_write()
-    driver.connected = True  # recovered before the read thread looked
-    driver.write_error = None
-    plc.scan_read()
-    assert rec.connection == [CONNECTING, CONNECTED]
-    assert driver.connects == 1
 
 
 def test_write_error_with_live_transport_keeps_the_connection(plc, driver):
@@ -409,12 +394,10 @@ def test_stop_waits_at_most_the_join_timeout_in_total(driver, monkeypatch):
     monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.3)
     release = threading.Event()
     driver.read = lambda symbols: (release.wait(5), ReadResult())[1]
-    driver.write = lambda values: (release.wait(5), {})[1]
     plc = PlcRuntime(driver, name="J", enabled=True)
     plc.set_read_variables(["GVL.a"])
     plc.start()
-    plc.queue_write("GVL.a", 1)
-    time.sleep(0.1)  # both workers are now inside the driver
+    time.sleep(0.1)  # the worker is now inside the driver
     workers = [t for t in threading.enumerate() if t.name.startswith("J-")]
     started = time.monotonic()
     plc.stop()
@@ -447,7 +430,7 @@ def test_restart_while_a_worker_is_stuck_leaves_no_zombie(driver, monkeypatch):
     release.set()  # the old thread returns from its read now
     time.sleep(0.3)
     workers = [t for t in threading.enumerate() if t.name.startswith("Z-")]
-    assert sorted(t.name for t in workers) == ["Z-read", "Z-write"]
+    assert sorted(t.name for t in workers) == ["Z-plc"]
     assert plc.is_connected  # the zombie's exit did not close the new run's connection
     plc.stop()
 
@@ -496,7 +479,7 @@ def test_concurrent_start_calls_start_one_pair(driver):
         t.start()
     for t in threads:
         t.join()
-    assert len([t for t in threading.enumerate() if t.name.startswith("C-")]) == 2
+    assert len([t for t in threading.enumerate() if t.name.startswith("C-")]) == 1
     plc.stop()
 
 
@@ -717,8 +700,8 @@ def test_a_bad_refresh_value_does_not_kill_the_read_thread(driver, caplog):
     with caplog.at_level(logging.ERROR, logger="plc_bridge.runtime"):
         plc.refresh_ms = None
         time.sleep(0.1)
-        assert [t.name for t in threading.enumerate() if t.name == "F-read"]
-        assert "read scan failed" in caplog.text
+        assert [t.name for t in threading.enumerate() if t.name == "F-plc"]
+        assert "scan failed" in caplog.text
     got.clear()
     plc.refresh_ms = 5
     plc.reconnect()  # wakes the idle loop
@@ -742,8 +725,8 @@ def test_pathological_refresh_values_are_logged_and_idle(driver, caplog, bad):
         plc.refresh_ms = bad
         plc.reconnect()  # wake, so the bad value is seen at once
         time.sleep(0.3)
-    assert "read scan failed" in caplog.text
-    assert [t for t in threading.enumerate() if t.name == "P-read"]  # alive
+    assert "scan failed" in caplog.text
+    assert [t for t in threading.enumerate() if t.name == "P-plc"]  # alive
     assert len(driver.reads) - reads_before < 20  # idle, not spinning
     plc.refresh_ms = 5
     plc.reconnect()
@@ -777,7 +760,7 @@ def test_a_huge_refresh_value_is_capped_not_fatal(driver, caplog):
         plc.refresh_ms = 1e13
         time.sleep(0.2)
     assert caplog.text == ""
-    assert [t for t in threading.enumerate() if t.name == "H-read"]
+    assert [t for t in threading.enumerate() if t.name == "H-plc"]
     plc.refresh_ms = 5
     plc.reconnect()  # wakes the (capped) wait
     got.clear()
@@ -864,7 +847,7 @@ def test_a_timed_wait_returning_early_does_not_speed_up_the_cadence(driver, monk
     scans = []
     original_read = driver.read
     driver.read = lambda symbols: (scans.append(Clock.now), original_read(symbols))[1]
-    plc._read_loop_body(run)
+    plc._loop_body(run)
     # 49 scans at a 20 ms period span 48 x 20 ms of fake time, not 48 x 19 ms
     assert len(scans) == 49
     assert abs((scans[-1] - scans[0]) - 48 * 0.020) < 0.002, scans[-1] - scans[0]
@@ -902,7 +885,7 @@ def test_a_real_wake_rebases_the_schedule(driver, monkeypatch):
     plc.set_read_variables(["GVL.a"])
     run = FakeRun()
     plc._run = run
-    plc._read_loop_body(run)
+    plc._loop_body(run)
     # after the wake at +5 ms the next scan is a full period later, not 15 ms
     assert [round(w, 3) for w in run.waits] == [0.0, 0.02, 0.02, 0.02]
 
@@ -921,3 +904,155 @@ def test_reassigning_an_unchanged_value_emits_but_does_not_wake(driver):
     assert rec.enabled == [True] * 50          # every assignment is reported...
     assert len(driver.reads) - before <= 3     # ...but the cadence stays 10 Hz
     plc.stop()
+
+
+# region - contract v2: samples, problems, write acknowledgement
+
+def test_samples_carry_seq_time_flat_values_and_nest_lazily(plc, driver):
+    samples = []
+    plc.on_sample(samples.append)
+    assert plc.latest() is None
+    plc.scan()
+    plc.scan()
+    assert [s.seq for s in samples] == [1, 2]
+    assert samples[0].values == {"GVL.a": 1, "GVL.arr[1]": 2}
+    assert samples[0].nested == {"GVL": {"a": 1, "arr": [None, 2]}}
+    assert samples[0].separators == "."
+    assert samples[1].t >= samples[0].t
+    assert plc.latest() is samples[1]
+
+
+def test_sample_errors_travel_with_the_sample(plc, driver):
+    samples = []
+    plc.on_sample(samples.append)
+    driver.errors = {"GVL.arr[1]": "symbol not found"}
+    del driver.values["GVL.arr[1]"]
+    plc.scan()
+    assert samples[0].values == {"GVL.a": 1}
+    assert samples[0].errors == {"GVL.arr[1]": "symbol not found"}
+
+
+def test_problems_are_structured_and_status_is_their_text(plc, driver):
+    from plc_bridge import PROBLEM_OK, PROBLEM_READ, Problem
+    problems, status = [], []
+    plc.on_problem(problems.append)
+    plc.on_status(status.append)
+    driver.errors = {"GVL.arr[1]": "symbol not found"}
+    del driver.values["GVL.arr[1]"]
+    plc.scan()
+    driver.errors = {}
+    driver.values["GVL.arr[1]"] = 2
+    plc.scan()
+    assert problems == [
+        Problem(PROBLEM_READ, "Error Reading: GVL.arr[1]: symbol not found", ("GVL.arr[1]",)),
+        Problem(PROBLEM_OK, "Reading OK"),
+    ]
+    assert status == [p.text for p in problems]
+
+
+def test_connect_problems_are_structured_and_not_followed_by_reading_ok(plc, driver):
+    from plc_bridge import PROBLEM_CONNECT
+    problems = []
+    plc.on_problem(problems.append)
+    driver.connect_error = OSError("no route")
+    plc.scan()
+    driver.connect_error = None
+    plc.scan()
+    assert [p.kind for p in problems] == [PROBLEM_CONNECT]
+    assert problems[0].text == "Error Connecting: no route"
+
+
+def test_write_handle_resolves_ok(plc, driver):
+    plc.scan()
+    handle = plc.queue_write("GVL.a", 5)
+    assert not handle.done
+    plc.scan_write()
+    assert handle.done and handle.ok and handle.error is None
+    assert handle.wait(0) is True
+
+
+def test_write_handle_carries_the_plc_rejection(plc, driver):
+    from plc_bridge import WriteResult
+    results = []
+    plc.on_write(results.append)
+    plc.scan()
+    driver.write_rejects = {"GVL.b": "symbol not found"}
+    ok = plc.queue_write("GVL.a", 1)
+    bad = plc.queue_write("GVL.b", 2)
+    plc.scan_write()
+    assert ok.ok and bad.done and not bad.ok and bad.error == "symbol not found"
+    assert results == [WriteResult({"GVL.a": 1, "GVL.b": 2}, {"GVL.b": "symbol not found"})]
+
+
+def test_write_handle_carries_a_whole_request_failure(plc, driver):
+    results = []
+    plc.on_write(results.append)
+    plc.scan()
+    driver.write_error = RuntimeError("denied")
+    handle = plc.queue_write("GVL.a", 1)
+    plc.scan_write()
+    assert handle.done and handle.error == "denied"
+    assert results[0].error == "denied" and results[0].errors == {}
+
+
+def test_a_superseded_write_is_told_so(plc):
+    first = plc.queue_write("GVL.a", 1)
+    second = plc.queue_write("GVL.a", 2)
+    assert first.done and first.error == "superseded"
+    assert not second.done
+
+
+def test_pending_writes_fail_on_stop(plc):
+    plc.start()
+    handle = plc.queue_write("GVL.zzz", 1)
+    plc.enabled = False  # never connects, so the write stays queued
+    plc.stop()
+    assert handle.done and handle.error == "stopped"
+
+
+def test_a_scan_writes_before_it_reads(plc, driver):
+    order = []
+    original_read, original_write = driver.read, driver.write
+
+    def read(symbols):
+        order.append("read")
+        return original_read(symbols)
+
+    def write(values):
+        order.append("write")
+        return original_write(values)
+
+    driver.read, driver.write = read, write
+    plc.scan()  # connects and reads
+    plc.queue_write("GVL.a", 1)
+    plc.scan()
+    assert order == ["read", "write", "read"]
+
+
+def test_queue_write_wakes_an_idle_period(driver):
+    plc = PlcRuntime(driver, name="WQ", enabled=True, refresh_ms=2000)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    assert _wait_for_reads(driver, 1)
+    time.sleep(0.05)
+    started = time.monotonic()
+    handle = plc.queue_write("GVL.a", 9)
+    assert handle.wait(1.0)
+    assert time.monotonic() - started < 0.5
+    assert driver.writes == [{"GVL.a": 9}]
+    plc.stop()
+
+
+def test_latest_is_readable_from_another_thread_while_polling(plc, driver):
+    plc.refresh_ms = 2
+    plc.start()
+    deadline = time.monotonic() + 2
+    seen = set()
+    while time.monotonic() < deadline and len(seen) < 5:
+        sample = plc.latest()
+        if sample is not None:
+            seen.add(sample.seq)
+    plc.stop()
+    assert len(seen) >= 5
+
+# endregion
