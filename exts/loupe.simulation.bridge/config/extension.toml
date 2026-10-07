@@ -1,0 +1,72 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "0.3.0-rc1"
+category = "simulation"
+title = "PLC Bridge"
+description = "Vendor-neutral PLC bridge for Omniverse: /PLC prims, a driver registry, main-thread delivery, the message bus and the USD mirror. Vendor extensions register a driver."
+authors = ["Loupe"]
+repository = "https://github.com/loupeteam/Omni-Utils"
+keywords = ["PLC", "Digital Twin", "Beckhoff", "B&R"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+preview_image = "data/preview.png"
+icon = "data/icon.png"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+# Everything used in on_startup has to be declared here. An app that lists them in
+# its own dependencies is not enough: that says what to load, not what to load
+# first; only the consuming extension's manifest orders startup.
+#
+#   omni.timeline        get_timeline_interface() raises outright if not yet loaded
+#   omni.usd             get_context() returns None before omni.usd has started
+#   omni.kit.menu.utils  add_menu_items is imported at module level
+"omni.timeline" = {}
+"omni.usd" = {}
+"omni.kit.menu.utils" = {}
+# Installs the pip requirements below before this extension starts. Without
+# it an app that enables only this extension (the omni.kit.test startup test)
+# never starts pipapi, and the import of plc_bridge fails.
+"omni.kit.pipapi" = {}
+
+[python.pipapi]
+# The polling runtime and the driver contract are the plain-Python plc-bridge
+# package (plc_bridge/ at the root of this repo). The framework owns the exact
+# pin: Kit installs every extension's pip requirements into one site-packages
+# and does not resolve conflicts, so vendor extensions pin only their own
+# library and take plc-bridge from here.
+requirements = ["plc-bridge==0.3.0rc1"]
+# What pipapi imports to decide whether the requirement is already satisfied;
+# it calls pip only when this import fails, so an editable install into Kit's
+# Python (tools/dev_link.py) takes precedence over the bundled wheel. A
+# submodule rather than the package: Kit has its working directory on
+# sys.path, and from this repo's root the bare plc_bridge/ folder imports as an
+# empty namespace package, which would pass a package-level check.
+modules = ["plc_bridge.runtime"]
+# Until plc-bridge is on PyPI its wheel ships in wheels/ in the extension
+# folder; tools/build_wheels.py fills it from the checkout.
+archiveDirs = ["wheels"]
+use_online_index = true
+
+[[python.module]]
+name = "loupe.simulation.bridge"
+public = true
+
+[settings.exts."loupe.simulation.bridge"]
+# When false, a prim whose bridge:Enable is true still comes up disabled, so a
+# committed stage cannot open a connection to hardware by surprise; the UI
+# says why. Enable from the UI or from code as usual.
+autoConnect = true
+# Also push the vendor-named bus events (loupe.simulation.beckhoff_bridge.*,
+# loupe.simulation.br_bridge.*) and accept requests on them. Default on in
+# 0.3; off by default in 0.4; gone in 0.5.
+legacyBusNames = true
+
+[[test]]
+dependencies = [
+    "omni.kit.ui_test",
+]
+timeout = 120

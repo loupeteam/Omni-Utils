@@ -1,226 +1,342 @@
-import omni
-from .RuntimeBase import Runtime_Base
-from .BridgeManager import BridgeManager
-from .UsdManager import (RuntimeUsd, get_options_from_prim, set_options_on_prim,
-                         ATTR_MIRROR_USD)
+"""
+The System: one object that owns a Runtime per PLC prim in the stage, plus
+the components built on each (the bus adapter, the USD mirror).
+
+Copyright (c) 2024 Loupe, https://loupe.team
+Part of Omni-Utils, licensed under the MIT License.
+
+The extension creates one System at startup and keeps it in step with the
+stage on every open and close. Vendor extensions never touch it: they
+register a driver, and the System builds a Runtime for every prim that names
+it. Components are registered the same way (`register_component`): a factory
+that gets the runtime and its config and returns an object with `cleanup()`,
+or None when it does not apply to that PLC.
+"""
+
+import logging
+from typing import Callable, Optional
+
+import carb.settings
+import omni.usd
+
+from . import registry
+from .delivery import MainThreadDelivery
+from .registry import DriverSpec
+from .Runtime import Runtime
+from .schema import DEFAULT_ROOT, PlcConfig, author_config, classify, component_name, discover, read_config
+
+logger = logging.getLogger(__name__)
+
+SETTING_AUTO_CONNECT = "/exts/loupe.simulation.bridge/autoConnect"
 
 
 class Component:
-    """
-    This is a holder for the Runtime and USD Component of a single component
-    """
+    """One PLC: its Runtime and the registered components built on it, by kind."""
 
-    def __init__(self, runtime, usd):
-        """
-        Initializes the System class with runtime and USD parameters.
-
-        Args:
-            runtime: The runtime environment for the system.
-            usd: The USD (Universal Scene Description) file or object.
-        """
+    def __init__(self, runtime: Runtime, config: PlcConfig):
         self.runtime = runtime
-        self.usd = usd
+        self.config = config
+        self.parts = {}
+
+    # 0.2.x name for the mirror.
+    usd = property(lambda self: self.parts.get("mirror"))
+    bus = property(lambda self: self.parts.get("bus"))
+
+    def cleanup(self):
+        for kind, part in list(self.parts.items()):
+            try:
+                part.cleanup()
+            except Exception:
+                logger.exception("%s: %s component cleanup failed", self.runtime.name, kind)
+        self.parts.clear()
+        self.runtime.cleanup()
 
 
 class System:
     """
-    System class for managing multiple component objects
+    Manages the PLC components of the open stage.
+
+    Args:
+        system_root: the prim path prefix a component name is relative to.
+        auto_connect: None reads the setting /exts/loupe.simulation.bridge/autoConnect
+            at every component creation; a bool fixes it (tests).
     """
 
-    def __init__(
-        self,
-        system_root: str,
-        DefaultAttributes: dict,
-        runtime_class: Runtime_Base,
-        manager_class: BridgeManager,
-    ):
-        self.init(system_root, DefaultAttributes, runtime_class, manager_class)
-
-    def init(
-        self, system_root: str, DefaultAttributes: dict, runtime_class, manager_class
-    ):
-        """ """
-        self.default_properties = DefaultAttributes
+    def __init__(self, system_root: str = DEFAULT_ROOT, auto_connect: Optional[bool] = None):
         self._system_root = system_root
-        self._components:dict[str, Component] = dict()
-        self._runtime_class = runtime_class
-        self._manager_class = manager_class
+        self._auto_connect = auto_connect
+        self._components = {}
+        self._factories = {}
+        self._warned_legacy = set()
+        self._unresolved = {}
+        self.delivery = MainThreadDelivery()
+        self._registry_remove = registry.add_listener(self._on_registry_event)
 
     system_root = property(lambda self: self._system_root)
+    unresolved = property(lambda self: dict(self._unresolved),
+                          doc="prim path -> driver name, for prims naming a driver nobody registered.")
+
+    @property
+    def auto_connect(self) -> bool:
+        if self._auto_connect is not None:
+            return self._auto_connect
+        value = carb.settings.get_settings().get(SETTING_AUTO_CONNECT)
+        return True if value is None else bool(value)
+
     def get_normalize_prim_name(self, name: str) -> str:
         if name.startswith("/"):
             return name
-        return self.system_root + name
-    
+        return self._system_root + name
+
+    def dispose(self):
+        """Release everything, including the delivery and the registry listener. The extension's shutdown."""
+        self.cleanup()
+        if self._registry_remove is not None:
+            self._registry_remove()
+            self._registry_remove = None
+        self.delivery.cleanup()
+
     def cleanup(self):
-        """
-        Remove all the runtime and USD objects from the system
-        """
-        for component in self._components.values():
-            component.runtime.cleanup()
-            if component.usd is not None:
-                component.usd.cleanup()
-
+        """Remove every component. The stage is about to change or go away."""
+        for name, component in list(self._components.items()):
+            self.delivery.detach(name)
+            component.cleanup()
         self._components.clear()
+        self._unresolved = {}
 
-    def find_components(self) -> dict[str, dict[str, any]]:
+    # region - Registered components
+
+    def register_component(self, kind: str, factory: Callable):
         """
-        Find all the prims in the stage that have the Bridge parameters
-        Return a dictionary of the prim names and their options
+        Register `factory(system, runtime, config) -> object | None` to be
+        called for every PLC. The object needs a `cleanup()`. Registering a
+        kind again replaces it for PLCs created from now on.
         """
-        stage = omni.usd.get_context().get_stage()
+        self._factories[kind] = factory
+
+    def unregister_component(self, kind: str):
+        self._factories.pop(kind, None)
+
+    def install_default_components(self):
+        """The framework's own components: the bus adapter and the USD mirror."""
+        self.register_component("bus", bus_component)
+        self.register_component("mirror", mirror_component)
+
+    def get_part(self, name: str, kind: str):
+        component = self._components.get(name)
+        return None if component is None else component.parts.get(kind)
+
+    # endregion
+    # region - Stage discovery
+
+    def _stage(self):
+        context = omni.usd.get_context()
+        return None if context is None else context.get_stage()
+
+    def find_components(self) -> Optional[dict]:
+        """
+        The PLC prims in the stage, name -> PlcConfig; None when no stage is
+        open. Prims naming an unregistered driver are left out and listed in
+        `unresolved`.
+        """
+        stage = self._stage()
         if stage is None:
-            return
-        components_prims = []
-        for prim in stage.Traverse():
-            for option in self.default_properties:
-                if not prim.HasAttribute(option):
-                    continue
-                components_prims.append(prim)
-                break
-        # For all the prims found, get the prim name and add it to the list
-        names = dict()
-        for component in components_prims:
-            if component.GetPath().pathString.startswith(self.system_root):
-                name = component.GetPath().pathString.removeprefix(self.system_root)
-            else:
-                name = component.GetPath().pathString
-            options = get_options_from_prim(component, self.default_properties)
-            # Read directly rather than through the defaults, so an extension does not
-            # have to list this in its own property table to be able to turn the mirror
-            # off. Absent means on, so scenes that predate it are unaffected.
-            mirror = component.GetAttribute(ATTR_MIRROR_USD)
-            options[ATTR_MIRROR_USD] = bool(mirror.Get()) if mirror.IsValid() else True
-            names[name] = options
-        return names
+            return None
+        configs, self._unresolved = discover(stage, self._system_root, self._warned_legacy)
+        for path, driver in self._unresolved.items():
+            logger.warning("%s: no driver named %r is registered; is its extension enabled?", path, driver)
+        return {config.name: config for config in configs}
 
-    def find_and_create_components(self) -> list[str]:
-        """
-        Find the components defined in the stage and create runtime objects for them
-        """
-        # Find all the components in the stage
-        components = self.find_components()
-        if components is None:
-            return
-
-        # Create runtimes for the prims found in the stage. The prim already exists
-        # and its options were just read from it, so do not author them back: that
-        # would dirty the stage merely by opening it (and a dirty stage blocks a
-        # headless app from exiting, because omni.kit.window.file cancels shutdown
-        # to ask about unsaved changes).
-        for name, options in components.items():
+    def find_and_create_components(self) -> Optional[list]:
+        """Create a component for every PLC prim that has none, and drop those whose prim is gone."""
+        found = self.find_components()
+        if found is None:
+            return None
+        # The prim already exists and its options were just read from it, so it
+        # is not authored back: that would dirty the stage merely by opening it.
+        for name, config in found.items():
             if name not in self._components:
-                self.add_component(name, options, author_prim=False)
-
-        # Remove components that are not in the stage
-        for name in list(self._components.keys()):
-            if name not in components:
-                self._components[name].runtime.cleanup()
-                if self._components[name].usd is not None:
-                    self._components[name].usd.cleanup()
-                del self._components[name]
-
-        # Return the names of the components
+                try:
+                    self.add_component(name, config, author_prim=False)
+                except Exception:
+                    logger.exception("%s: could not create the PLC component", config.path)
+        for name in list(self._components):
+            if name not in found:
+                self.remove_component(name)
         return self.get_component_names()
 
-    def create_component_prim(self, name: str, options: dict) -> str:
-        """
-        Create a new component in the stage with the given name and options
-        """
-        prim_name = self.get_normalize_prim_name(name)
+    # endregion
+    # region - Components
 
-        component_prim = omni.usd.get_context().get_stage().DefinePrim(prim_name)
-        set_options_on_prim(component_prim, options)
-        return prim_name
+    def get_component(self, name: str) -> Optional[Runtime]:
+        component = self._components.get(name)
+        return None if component is None else component.runtime
 
-    def get_component(self, name: str | int) -> Runtime_Base | None:
-        """
-        Get the runtime object for the given component name
-        """
-        if name not in self._components:
-            return None
-        return self._components[name].runtime
+    def get_component_names(self) -> list:
+        return list(self._components)
 
-    def write_options_to_stage(self, component_name: str | int):
-        """
-        Write the options for the given component from the runtime object to the stage
-        """
-        component = self.get_component(component_name)
-        if component is None:
-            return
+    def get_config(self, name: str) -> Optional[PlcConfig]:
+        component = self._components.get(name)
+        return None if component is None else component.config
 
-        component_prim = (
-            omni.usd.get_context()
-            .get_stage()
-            .GetPrimAtPath(self.get_normalize_prim_name(component_name))
-        )
-        if component_prim is None:
-            return
-
-        set_options_on_prim(component_prim, component.options)
-
-    def read_options_from_stage(self, component_name: str | int):
+    def add_component(self, name: str, options=None, author_prim: bool = True, driver: Optional[str] = None) -> Runtime:
         """
-        Read the options for the given component from the stage to the runtime object
-        """
-        component = self.get_component(component_name)
-        if component is None:
-            return
+        Create the Runtime (and the registered components) for one PLC.
 
-        component_prim = (
-            omni.usd.get_context()
-            .get_stage()
-            .GetPrimAtPath(self.get_normalize_prim_name(component_name))
-        )
-        if component_prim is None:
-            return
-
-        component.options = get_options_from_prim(
-            component_prim, self.default_properties
-        )
-
-    # Return the names of the components as a list
-    def get_component_names(self) -> list[str]:
+        Args:
+            name: the component name; the prim is `<system_root><name>` unless
+                the name is already a path.
+            options: a PlcConfig, or a dict of prim attribute names to values
+                (`bridge:driver`, `bridge:Enable`, `beckhoff:AmsNetId`, ...).
+            author_prim: define the prim and write the options onto it. False
+                for a prim that already exists and was just read.
+            driver: the driver name when `options` does not carry one; default
+                the first registered driver.
         """
-        Get the names of all the components in the system
-        """
-        return list(self._components.keys())
-
-    def add_component(self, name, options, author_prim: bool = True):
-        """
-        Add a new component to the system with the given name and options
-        Create the PRIM in the stage (unless author_prim is False, for a prim that
-        already exists and whose options were read from it)
-        Create the runtime and USD objects for the component
-        """
-        if name not in self._components:
-            input_options = self.default_properties.copy()
-            input_options.update(options)
-            # Mirroring is a property of the USD side, not a reason to skip building
-            # it. RuntimeUsd also carries the other direction -- an edit of a
-            # write:value attribute becoming a write to the bridge -- and turning the
-            # mirror off must not take that with it.
-            #
-            # Popped rather than passed on: everything else here is round-tripped onto
-            # the prim by create_component_prim, and authoring this one back would add
-            # an attribute to every component prim in every existing scene merely for
-            # having opened it.
-            mirror = input_options.pop(ATTR_MIRROR_USD, True)
-            if author_prim:
-                prim_name = self.create_component_prim(name, input_options)
-            else:
-                prim_name = self.get_normalize_prim_name(name)
-            # Register the runtime before building the USD side: RuntimeUsd takes a
-            # Manager for this name, and a Manager checks that its PLC is loaded,
-            # so building it first made every stage open log a false "no PLC prim"
-            # warning about a component that was one statement away from existing.
-            component = Component(self._runtime_class(name, input_options), None)
-            self._components[name] = component
+        if name in self._components:
+            return self._components[name].runtime
+        path = self.get_normalize_prim_name(name)
+        if isinstance(options, PlcConfig):
+            config = options
+        else:
+            config = self._config_from_options(name, path, options or {}, driver)
+        spec = registry.get(config.driver)
+        if spec is None:
+            raise LookupError(f"{path}: no driver named {config.driver!r} is registered")
+        if author_prim:
+            self.create_component_prim(name, config, spec)
+        runtime = Runtime(name, config, spec, auto_connect=self.auto_connect)
+        component = Component(runtime, config)
+        self._components[name] = component
+        self.delivery.attach(name, runtime.plc)
+        for kind, factory in list(self._factories.items()):
             try:
-                component.usd = RuntimeUsd(
-                    prim_name, self._manager_class(name), mirror=mirror
-                )
+                part = factory(self, runtime, config)
             except Exception:
-                component.runtime.cleanup()
-                del self._components[name]
-                raise
+                logger.exception("%s: %s component failed to build", name, kind)
+                continue
+            if part is not None:
+                component.parts[kind] = part
+        return runtime
+
+    def remove_component(self, name: str):
+        component = self._components.pop(name, None)
+        if component is None:
+            return
+        self.delivery.detach(name)
+        component.cleanup()
+
+    def _config_from_options(self, name: str, path: str, options: dict, driver: Optional[str]) -> PlcConfig:
+        from .schema import ATTR_DRIVER
+        driver = options.get(ATTR_DRIVER) or driver
+        if driver is None:
+            names = registry.names()
+            if not names:
+                raise LookupError("no driver is registered")
+            driver = names[0]
+        spec = registry.get(driver)
+        if spec is None:
+            raise LookupError(f"no driver named {driver!r} is registered")
+        config = PlcConfig(name=name, path=path, driver=driver, options=dict(spec.defaults))
+        # Route the rest through the adapter's option normaliser by building a
+        # throwaway view: simpler to apply the dict after construction.
+        self._apply_option_dict(config, spec, options)
+        return config
+
+    @staticmethod
+    def _apply_option_dict(config: PlcConfig, spec: DriverSpec, options: dict):
+        from .schema import ATTR_ENABLE, ATTR_MIRROR, ATTR_MIRROR_SYMBOLS, ATTR_REFRESH, ATTR_VARIABLES, _as_list
+        legacy = (spec.legacy_namespace + ":") if spec.legacy_namespace else None
+        for key, value in options.items():
+            if value is None:
+                continue
+            if key == ATTR_ENABLE or (legacy and key == legacy + "Enable"):
+                config.enabled = bool(value)
+            elif key == ATTR_REFRESH or (legacy and key == legacy + "RefreshRate"):
+                config.refresh_ms = value
+            elif key == ATTR_VARIABLES or (legacy and key == legacy + "Variables"):
+                config.variables = _as_list(value)
+            elif key == ATTR_MIRROR:
+                config.mirror = bool(value)
+            elif key == ATTR_MIRROR_SYMBOLS:
+                config.mirror_symbols = _as_list(value)
+            else:
+                bare = key
+                for prefix in (spec.namespace + ":", legacy):
+                    if prefix and key.startswith(prefix):
+                        bare = key[len(prefix):]
+                option = spec.option(bare)
+                if option is not None:
+                    config.options[bare] = option.coerce(value)
+
+    def create_component_prim(self, name: str, config: PlcConfig, spec: Optional[DriverSpec] = None) -> str:
+        """Define the PLC prim and write the config onto it in the neutral form. Returns the prim path."""
+        spec = spec or registry.get(config.driver)
+        path = self.get_normalize_prim_name(name)
+        prim = self._stage().DefinePrim(path)
+        author_config(prim, config, spec)
+        return path
+
+    def write_options_to_stage(self, name: str):
+        """Write a component's current configuration onto its prim (neutral attributes; secrets as references)."""
+        runtime = self.get_component(name)
+        if runtime is None:
+            return
+        stage = self._stage()
+        prim = stage.GetPrimAtPath(runtime.path) if stage is not None else None
+        if prim is None or not prim.IsValid():
+            return
+        author_config(prim, runtime.to_config(), runtime.spec, runtime.secret_refs)
+
+    def read_options_from_stage(self, name: str):
+        """Re-read a component's prim and apply the options to the runtime."""
+        runtime = self.get_component(name)
+        if runtime is None:
+            return
+        stage = self._stage()
+        prim = stage.GetPrimAtPath(runtime.path) if stage is not None else None
+        if prim is None or not prim.IsValid():
+            return
+        found = classify(prim)
+        if found is None or found[1] is None:
+            return
+        config = read_config(prim, found[1], found[2], self._system_root)
+        runtime.options = config.to_options(found[1])
+        self._components[name].config = config
+
+    # endregion
+    # region - Registry events
+
+    def _on_registry_event(self, event, spec: DriverSpec):
+        if event == registry.EVENT_REGISTERED:
+            # Prims that named this driver before it existed can be built now;
+            # components built on a previous registration of the name are
+            # rebuilt on the new class.
+            for name, component in list(self._components.items()):
+                if component.runtime.driver_name == spec.name and component.runtime.spec is not spec:
+                    self.remove_component(name)
+            if self._stage() is not None:
+                self.find_and_create_components()
+        elif event == registry.EVENT_UNREGISTERED:
+            for name, component in list(self._components.items()):
+                if component.runtime.driver_name == spec.name:
+                    self.remove_component(name)
+
+    # endregion
+
+
+def bus_component(system: System, runtime: Runtime, config: PlcConfig):
+    """The message bus adapter: neutral names, plus the driver's legacy names while the setting allows."""
+    from .bus import BUS_NAMESPACE, BusAdapter, legacy_bus_names_enabled
+    namespaces = [BUS_NAMESPACE]
+    if runtime.spec.legacy_namespace and legacy_bus_names_enabled():
+        namespaces.append(runtime.spec.legacy_namespace)
+    return BusAdapter(runtime, namespaces)
+
+
+def mirror_component(system: System, runtime: Runtime, config: PlcConfig):
+    """The USD mirror, for PLCs whose prim has bridge:MirrorToUsd true (the default)."""
+    if not runtime.mirror:
+        return None
+    from .UsdManager import RuntimeUsd
+    return RuntimeUsd(runtime.path, runtime, system.delivery, runtime.mirror_symbols)
