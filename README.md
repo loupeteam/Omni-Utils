@@ -1,9 +1,71 @@
 # Omni-Utils
-Common tools for Loupe Omniverse extensions
 
-## plc_bridge
+Loupe's vendor-neutral PLC bridge for Omniverse, in two layers:
 
-[`plc_bridge/`](plc_bridge/README.md) is a plain-Python package with no Omniverse dependency: the
-driver contract every vendor bridge implements (`PlcDriver`) and the polling runtime that drives it
-(`PlcRuntime`). The Kit modules at the root of this repo are unchanged and do not use it yet;
-`Runtime_Base` stays for extensions that still derive from it.
+| Folder | What | Depends on |
+|---|---|---|
+| [`plc_bridge/`](plc_bridge/README.md) | plain-Python package `plc-bridge`: the `PlcDriver` contract every vendor implements and the `PlcRuntime` that polls it. No Omniverse imports. | nothing |
+| [`exts/loupe.simulation.bridge/`](exts/loupe.simulation.bridge/docs/README.md) | the Kit extension: `/PLC` prims, the driver registry, main-thread delivery, the message bus, the USD mirror, the window. | `plc-bridge` (pip), Kit |
+
+Vendor extensions ([Beckhoff](https://github.com/loupeteam/Omniverse_Beckhoff_Bridge_Extension),
+[B&R](https://github.com/loupeteam/Omniverse_BnR_Bridge_Extension)) depend on
+the Kit extension and register a driver with it; a simulation depends on the
+Kit extension only. The design and the decisions are in the Beckhoff repo's
+`docs/ARCHITECTURE_PLAN.md`; the work, in phases, in its
+`docs/IMPLEMENTATION_PLAN.md`. How to get data out of a PLC in Kit:
+[docs/CONSUMING.md](docs/CONSUMING.md).
+
+`RuntimeBase.py` and `Global.py` at the root are what the 0.2.x vendor
+extensions still vendor through a git submodule; they go away with the
+submodules in Phase 4.
+
+## Installing the extension
+
+`loupe.simulation.bridge` lists `plc-bridge==<version>` as a pip requirement
+that Kit installs before the extension starts. Two ways to make it available:
+
+**From a registry or a packaged extension.** Until `plc-bridge` is on PyPI its
+wheel ships inside the extension, in `exts/loupe.simulation.bridge/wheels/`
+(git-ignored). Fill that folder before packaging:
+
+```
+python tools/build_wheels.py
+```
+
+On first start Kit installs from it with `--no-index` into the app's pip
+environment; on later starts it finds the package importable and does nothing.
+
+**From a clone.** Install the checkout editable into the Kit app's own Python:
+
+```
+python tools/dev_link.py <kit build root>      # the folder holding kit/kit.exe
+```
+
+Edits under `plc_bridge/src` are picked up on the next start. Add
+`--driver <path>` for each vendor driver checkout to link (`beckhoff_bridge/`,
+`br_bridge/` in their repos), which the tests and the harness need until Phase
+4 moves driver registration into the vendor extensions. `--uninstall` removes
+them again.
+
+What Kit's pipapi does with a requirement that is already importable, and the
+working-directory trap for a bare package folder at the repo root, is recorded
+in the Beckhoff repo's README ("What Kit's pipapi does"); the extension's
+`__init__.py` and the launchers under `tools/` guard against it.
+
+## Verification
+
+| Check | How |
+|---|---|
+| `plc_bridge` unit tests | `pip install -e "./plc_bridge[test]" && pytest plc_bridge` (CI: `.github/workflows/plc-bridge.yml`, Python 3.10 and 3.12) |
+| Kit tests of the extension | `tools\kit_test.ps1 -Kit <kit build root>` (omni.kit.test, a fake driver, no PLC) |
+| Headless harness | `tools\kit_check\run.ps1 -Kit <kit build root>`: a legacy Beckhoff prim live against TwinCAT and a neutral B&R prim against a mock OMJSON server, see [tools/kit_check/README.md](tools/kit_check/README.md) |
+| No Kit imports in the library | `git grep -l "import omni\|import carb" plc_bridge/` returns nothing (also a test) |
+
+## Licensing
+
+Everything under `plc_bridge/`, `tools/` and `docs/`, and `registry.py`,
+`schema.py`, `Runtime.py`, `delivery.py`, `bus.py`, `System.py`,
+`UsdManager.py`, `BridgeManager.py` in the extension are Loupe's, under the
+[MIT License](LICENSE). `extension.py`, `SystemUI.py` and `__init__.py` in the
+extension derive from NVIDIA's extension template and carry its header
+(NVIDIA Omniverse License Agreement and MIT, whichever is most restrictive).
