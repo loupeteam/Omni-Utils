@@ -19,28 +19,45 @@ from beckhoff_bridge import AdsDriver      # or a B&R driver written to the same
 
 plc = PlcRuntime(AdsDriver("10.20.30.40.1.1"), refresh_ms=20, enabled=True)
 plc.set_read_variables(["GVL.Axes[0].ActualPosition"])
-plc.on_data(lambda data: print(data["GVL"]["Axes"][0]["ActualPosition"]))
-plc.on_status(print)
+plc.on_sample(lambda s: print(s.seq, s.nested["GVL"]["Axes"][0]["ActualPosition"]))
+plc.on_problem(print)
 plc.start()
 ...
-plc.queue_write("GVL.Command.Blend", 1.0)
+handle = plc.queue_write("GVL.Command.Blend", 1.0)
+handle.wait(1.0); print(handle.ok)
 ...
 plc.stop()
 ```
 
+## What a consumer gets
+
+| Call | What arrives |
+|---|---|
+| `on_sample(cb)` | a `Sample` per successful read: `seq` (counts up), `t` (monotonic), flat `values`, per-symbol `errors`, and `nested` (the values as dicts and lists, built on first use). |
+| `on_data(cb)` | `Sample.nested` only; the 0.2.x shape. |
+| `latest()` | the newest `Sample`, from any thread, for consumers that pull once per tick instead of taking every packet. Compare `seq` to see whether it is new. |
+| `on_problem(cb)` | a `Problem` (`kind`, `text`, `symbols`) when a problem starts, every 2 s while it persists, and once (`kind == "ok"`) when a read problem clears. |
+| `on_status(cb)` | `Problem.text` only; the 0.2.x shape. |
+| `on_connection(cb)` | `Connecting`, `Connected`, `Disconnected`. |
+| `queue_write(name, value)` | returns a `WriteHandle`; `wait()` blocks until the write went out, `ok` / `error` say how it went. `on_write(cb)` gets a `WriteResult` per flushed batch. |
+
+Listeners run on the runtime's worker thread. A host with a main thread
+marshals to it itself, or polls `latest()` from its own loop.
+
 ## Writing a driver
 
 Subclass `PlcDriver` and implement `connect`, `disconnect`, `is_connected`,
-`read(symbols) -> ReadResult` and `write(values)`. The rules, from the class
-docstring:
+`read(symbols) -> ReadResult` and `write(values) -> errors`. The rules, from
+the class docstring:
 
 | Rule | Meaning |
 |---|---|
 | Synchronous | Every method blocks. A driver on an async transport (websockets) owns its event loop on a thread of its own and hides it. |
 | Bounded | Every method returns or raises within a timeout the driver chooses, a few seconds at most, and `disconnect` unblocks a call in flight (or the transport timeout is short enough to stand in for that). `stop()` waits two seconds, then closes the connection itself. |
-| Two caller threads | `read` comes from the read thread, `write` from the write thread, possibly at once. `connect` comes from the read thread; `disconnect` from the read thread or from whoever calls `stop()`. The driver makes that safe: two connections, or a lock. |
+| One caller at a time | `connect`, `read` and `write` come from the runtime's single worker, in turn: writes first, then the read, every period. Only `disconnect` may arrive from another thread, while a call is in flight. |
 | Stateless read list | The symbols arrive with each `read`, never empty. |
-| Flat in, flat out | `ReadResult.values` is flat symbol name to value. The runtime nests it, so every vendor's data has the same shape. |
+| One call, any number of requests | The driver may split a batch as its transport requires. |
+| Flat in, flat out | `ReadResult.values` is flat symbol name to value (a value may itself be a struct or list the vendor read whole). The runtime nests it, so every vendor's data has the same shape. |
 | Errors are not values | A symbol the PLC rejects goes in `ReadResult.errors`, or in the dict `write` returns. A failed connection or request raises; the runtime then asks `is_connected()` and reconnects if the transport is gone. |
 | `symbol_separators` | `"."` for Beckhoff (`GVL.struct.member`), `":."` for B&R (`Program:struct.member`). |
 
@@ -49,19 +66,20 @@ docstring:
 `nest` turns flat symbols into nested data: `a.b.c` becomes nested dicts,
 `arr[2]` a list padded with `None`, `arr[2].x` a dict inside that list. An index
 it cannot represent (`a[0,1]`, `a[1][2]`) raises `ValueError` naming the symbol,
-which the runtime reports as a status. This is the parser the Beckhoff and B&R
-bridges each carried a copy of.
+which the runtime reports as a read problem. This is the parser the Beckhoff and
+B&R bridges each carried a copy of.
 
 ## Threads
 
-Listeners run on the runtime's worker threads. A host with a main thread
-marshals to it itself. A listener that raises is logged and does not stop the
-polling. Both threads are daemons, and `stop()` returns within two seconds in
-total even when a read is stuck; a worker that outlives that exits on its own
-when the driver call returns, and a later `start()` is not confused by it.
+One worker thread per PLC. Every period it flushes the queued writes and then
+reads, in that order, so the sample that follows a write reflects it; a queued
+write wakes the loop so it goes out at once. The thread is a daemon, and
+`stop()` returns within two seconds even when a driver call is stuck; a worker
+that outlives that exits on its own when the call returns, and a later
+`start()` is not confused by it.
 
-`scan_read()` and `scan_write()` run one iteration each without threads, for
-tests and for hosts that bring their own scheduling.
+`scan()`, `scan_write()` and `scan_read()` run one iteration without a thread,
+for tests and for hosts that bring their own scheduling.
 
 ## Tests
 
