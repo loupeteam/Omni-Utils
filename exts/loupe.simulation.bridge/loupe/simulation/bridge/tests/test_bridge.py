@@ -8,6 +8,7 @@ needed. tests/vendor_drivers.py registers the real drivers for the harness.
 """
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -16,7 +17,7 @@ import carb.settings
 import omni.kit.app
 import omni.kit.test
 import omni.usd
-from pxr import Sdf
+from pxr import Sdf, Usd
 
 from plc_bridge import PlcDriver, ReadResult
 
@@ -560,15 +561,84 @@ class TestRobustness(BridgeTestCase):
         self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M4/GVL/a").IsValid()))
         self.assertFalse(self.stage.GetPrimAtPath("/PLC/M4/GVL/b").IsValid())
         rt.options = {ATTR_MIRROR_SYMBOLS: ["GVL.b"]}
+        # the rebuild is deferred to the next app update
+        self.assertIs(self.system.get_part("M4", "mirror"), first)
+        await ticks(1)
         second = self.system.get_part("M4", "mirror")
         self.assertIsNot(second, first)
         self.assertEqual(second.watch, ["GVL.b"])
         self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M4/GVL/b").IsValid()))
         rt.options = {"bridge:MirrorToUsd": False}
+        await ticks(1)
         self.assertIsNone(self.system.get_part("M4", "mirror"))
         self.assertEqual(self.system.delivery.listeners("M4"), 0)
         rt.options = {"bridge:MirrorToUsd": True}
+        await ticks(1)
         self.assertIsNotNone(self.system.get_part("M4", "mirror"))
+
+    async def test_mirror_change_from_a_worker_thread_rebuilds_on_main(self):
+        self.define("/PLC/M5", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.a"], ATTR_MIRROR_SYMBOLS: ["GVL.a"]})
+        self.system.find_and_create_components()
+        rt = self.system.get_component("M5")
+        first = self.system.get_part("M5", "mirror")
+        threads = []
+        original = self.system.rebuild_part
+
+        def probe(name, kind):
+            threads.append(threading.current_thread())
+            original(name, kind)
+
+        self.system.rebuild_part = probe
+        try:
+            worker = threading.Thread(target=lambda: setattr(rt, "options", {ATTR_MIRROR_SYMBOLS: ["GVL.b"]}))
+            worker.start()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            # nothing touched the stage on the worker thread
+            self.assertEqual(threads, [])
+            self.assertIs(self.system.get_part("M5", "mirror"), first)
+            self.assertTrue(await until(lambda: self.system.get_part("M5", "mirror") is not first))
+            self.assertEqual(threads, [MAIN_THREAD])
+            self.assertEqual(self.system.get_part("M5", "mirror").watch, ["GVL.b"])
+        finally:
+            del self.system.rebuild_part
+
+    async def test_write_to_usd_coerces_to_a_type_authored_in_a_sublayer(self):
+        sub = Sdf.Layer.CreateAnonymous("bridge_sub.usda")
+        sub_stage = Usd.Stage.Open(sub)
+        prim = sub_stage.DefinePrim("/PLC/T2", "Scope")
+        prim.CreateAttribute(ATTR_DRIVER, Sdf.ValueTypeNames.String, custom=True).Set("fake")
+        prim.CreateAttribute(ATTR_VARIABLES, Sdf.ValueTypeNames.String, custom=True).Set("GVL.a")
+        prim.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("7")
+        self.stage.GetRootLayer().subLayerPaths.append(sub.identifier)
+        self.stage.SetEditTarget(self.stage.GetRootLayer())
+        self.system.find_and_create_components()
+        rt = self.system.get_component("T2")
+        self.assertEqual((rt.read_variables, rt.driver.port), (["GVL.a"], 7))
+        rt.set_read_variables(["GVL.b", "GVL.c"])
+        rt.set_driver_option("Port", 9)
+        self.system.write_options_to_stage("T2")   # must not raise
+        attr = self.stage.GetPrimAtPath("/PLC/T2").GetAttribute(ATTR_VARIABLES)
+        self.assertEqual(attr.GetTypeName(), Sdf.ValueTypeNames.String)
+        self.assertEqual(attr.Get(), "GVL.b,GVL.c")
+        port = self.stage.GetPrimAtPath("/PLC/T2").GetAttribute("fake:Port")
+        self.assertEqual((port.GetTypeName(), port.Get()), (Sdf.ValueTypeNames.String, "9"))
+        self.assertEqual(self.stage.GetPrimAtPath("/PLC/T2").GetAttribute(ATTR_ENABLE).GetTypeName(),
+                         Sdf.ValueTypeNames.Bool)
+
+    async def test_update_from_usd_reports_a_malformed_attribute(self):
+        prim = self.define("/PLC/U1", {ATTR_DRIVER: "fake", "fake:Port": 3})
+        self.system.find_and_create_components()
+        prim.RemoveProperty("fake:Port")
+        prim.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("3x")
+        self.system.read_options_from_stage("U1")   # must not raise
+        self.assertIn("/PLC/U1", self.system.invalid)
+        self.assertEqual(self.system.get_component("U1").driver.port, 3)
+        prim.GetAttribute("fake:Port").Set("4")
+        self.system.read_options_from_stage("U1")
+        self.assertNotIn("/PLC/U1", self.system.invalid)
+        self.assertEqual(self.system.get_component("U1").driver.port, 4)
 
     async def test_no_delivery_after_removal_from_inside_a_callback(self):
         from .. import on_sample_main
@@ -620,10 +690,13 @@ def Scope "PLC" {
     }
 }
 ''')
-        await self.ctx.open_stage_async(path)
-        self.assertTrue(await until(lambda: self.system.get_component_names() == ["F1"]))
-        self.assertEqual(self.system.get_component("F1").read_variables, ["GVL.a"])
-        await self.ctx.close_stage_async()
-        self.assertTrue(await until(lambda: self.system.get_component_names() == []))
-        await self.ctx.new_stage_async()
-        self.stage = self.ctx.get_stage()
+        try:
+            await self.ctx.open_stage_async(path)
+            self.assertTrue(await until(lambda: self.system.get_component_names() == ["F1"]))
+            self.assertEqual(self.system.get_component("F1").read_variables, ["GVL.a"])
+            await self.ctx.close_stage_async()
+            self.assertTrue(await until(lambda: self.system.get_component_names() == []))
+        finally:
+            await self.ctx.new_stage_async()
+            self.stage = self.ctx.get_stage()
+            shutil.rmtree(folder, ignore_errors=True)
