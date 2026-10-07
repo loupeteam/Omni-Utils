@@ -86,6 +86,10 @@ class SystemUI:
                 if unresolved:
                     text = ", ".join(f"{path} ({driver})" for path, driver in unresolved.items())
                     ui.Label(f"No driver registered for: {text}", word_wrap=True, height=0)
+                invalid = self._system.invalid
+                if invalid:
+                    text = "; ".join(f"{path}: {reason}" for path, reason in invalid.items())
+                    ui.Label(f"Skipped (bad attributes or options): {text}", word_wrap=True, height=0)
                 if not drivers:
                     ui.Label("No driver is registered: enable a vendor bridge extension.", height=0)
         self._component_ui = ui.VStack(spacing=5, height=0)

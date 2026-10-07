@@ -69,12 +69,15 @@ class System:
         self._factories = {}
         self._warned_legacy = set()
         self._unresolved = {}
+        self._invalid = {}
         self.delivery = MainThreadDelivery()
         self._registry_remove = registry.add_listener(self._on_registry_event)
 
     system_root = property(lambda self: self._system_root)
     unresolved = property(lambda self: dict(self._unresolved),
                           doc="prim path -> driver name, for prims naming a driver nobody registered.")
+    invalid = property(lambda self: dict(self._invalid),
+                       doc="prim path -> reason, for PLC prims that could not be read or built.")
 
     @property
     def auto_connect(self) -> bool:
@@ -103,6 +106,7 @@ class System:
             component.cleanup()
         self._components.clear()
         self._unresolved = {}
+        self._invalid = {}
 
     # region - Registered components
 
@@ -142,9 +146,11 @@ class System:
         stage = self._stage()
         if stage is None:
             return None
-        configs, self._unresolved = discover(stage, self._system_root, self._warned_legacy)
+        configs, self._unresolved, self._invalid = discover(stage, self._system_root, self._warned_legacy)
         for path, driver in self._unresolved.items():
             logger.warning("%s: no driver named %r is registered; is its extension enabled?", path, driver)
+        for path, reason in self._invalid.items():
+            logger.warning("%s: PLC prim skipped: %s", path, reason)
         return {config.name: config for config in configs}
 
     def find_and_create_components(self) -> Optional[list]:
@@ -158,8 +164,14 @@ class System:
             if name not in self._components:
                 try:
                     self.add_component(name, config, author_prim=False)
-                except Exception:
-                    logger.exception("%s: could not create the PLC component", config.path)
+                except Exception as e:
+                    # A secret that does not resolve, a driver constructor that
+                    # rejects its options: the prim stays listed, not dropped.
+                    self._invalid[config.path] = str(e)
+                    # A warning, not an error: the prim is listed as skipped in
+                    # the window and the log, the rest of the stage comes up.
+                    logger.warning("%s: PLC prim skipped: %s", config.path, e)
+                    logger.debug("%s: traceback", config.path, exc_info=True)
         for name in list(self._components):
             if name not in found:
                 self.remove_component(name)
@@ -209,15 +221,37 @@ class System:
         component = Component(runtime, config)
         self._components[name] = component
         self.delivery.attach(name, runtime.plc)
-        for kind, factory in list(self._factories.items()):
-            try:
-                part = factory(self, runtime, config)
-            except Exception:
-                logger.exception("%s: %s component failed to build", name, kind)
-                continue
-            if part is not None:
-                component.parts[kind] = part
+        for kind in list(self._factories):
+            self._build_part(component, kind)
+        runtime.on_mirror_changed = lambda name=name: self.rebuild_part(name, "mirror")
+        # Only now: every listener is in place for the first scan.
+        runtime.start()
         return runtime
+
+    def _build_part(self, component: Component, kind: str):
+        factory = self._factories.get(kind)
+        if factory is None:
+            return
+        try:
+            part = factory(self, component.runtime, component.config)
+        except Exception:
+            logger.exception("%s: %s component failed to build", component.runtime.name, kind)
+            return
+        if part is not None:
+            component.parts[kind] = part
+
+    def rebuild_part(self, name: str, kind: str):
+        """Tear down one registered component of a PLC and build it again from the runtime's current state."""
+        component = self._components.get(name)
+        if component is None:
+            return
+        part = component.parts.pop(kind, None)
+        if part is not None:
+            try:
+                part.cleanup()
+            except Exception:
+                logger.exception("%s: %s component cleanup failed", name, kind)
+        self._build_part(component, kind)
 
     def remove_component(self, name: str):
         component = self._components.pop(name, None)

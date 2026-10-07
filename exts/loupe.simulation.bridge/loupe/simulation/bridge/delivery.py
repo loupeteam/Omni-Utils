@@ -142,7 +142,9 @@ class MainThreadDelivery:
         # Worker thread. Keep only the newest; a cheap dict assignment, so the
         # PLC loop is never slowed by a busy main thread.
         with self._lock:
-            if name in self._callbacks:
+            # Attached, not merely subscribed: a runtime that was detached
+            # while this sample was in flight must not leave a stale delivery.
+            if name in self._attached and name in self._callbacks:
                 self._pending[name] = sample
 
     def _on_update(self, event):
@@ -155,6 +157,13 @@ class MainThreadDelivery:
             callbacks = {name: list(self._callbacks.get(name, ())) for name in batch}
         for name, sample in batch.items():
             for callback in callbacks[name]:
+                # A callback earlier in this batch may have removed the
+                # component (or this listener); re-check before each call.
+                if name not in self._attached:
+                    break
+                with self._lock:
+                    if callback not in self._callbacks.get(name, ()):
+                        continue
                 self._delivered += 1
                 try:
                     callback(sample)

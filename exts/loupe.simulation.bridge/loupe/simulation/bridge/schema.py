@@ -235,13 +235,16 @@ def discover(stage: Usd.Stage, root: str = DEFAULT_ROOT, warned: Optional[set] =
             place so the warning is logged once per prim.
 
     Returns:
-        (configs, unresolved): the PlcConfigs in stage order, and
-        path -> driver name for prims naming a driver nobody has registered.
+        (configs, unresolved, invalid): the PlcConfigs in stage order,
+        path -> driver name for prims naming a driver nobody has registered,
+        and path -> reason for PLC prims whose attributes could not be read
+        (a malformed value); one bad prim never stops the others.
     """
     configs = []
     unresolved = {}
+    invalid = {}
     if stage is None:
-        return configs, unresolved
+        return configs, unresolved, invalid
     for prim in stage.Traverse():
         found = classify(prim)
         if found is None:
@@ -259,8 +262,11 @@ def discover(stage: Usd.Stage, root: str = DEFAULT_ROOT, warned: Optional[set] =
                 "vendor options to '%s:*' and use %s / %s / %s (a string[]) instead.",
                 path, spec.legacy_namespace, ATTR_DRIVER, spec.name, spec.namespace,
                 ATTR_ENABLE, ATTR_REFRESH, ATTR_VARIABLES)
-        configs.append(read_config(prim, spec, legacy, root))
-    return configs, unresolved
+        try:
+            configs.append(read_config(prim, spec, legacy, root))
+        except Exception as e:
+            invalid[path] = f"{type(e).__name__}: {e}"
+    return configs, unresolved, invalid
 
 
 # endregion
@@ -293,9 +299,15 @@ def _option_type(option: Option) -> Sdf.ValueTypeName:
 
 
 def set_attr(prim: Usd.Prim, name: str, value, type_name: Optional[Sdf.ValueTypeName] = None):
+    type_name = type_name or _type_for(value)
     attr = prim.GetAttribute(name)
+    if attr.IsValid() and attr.GetTypeName() != type_name:
+        # Authored with another type (bridge:Variables as a string, say): a
+        # Set() with the new value would be refused, so recreate it.
+        prim.RemoveProperty(name)
+        attr = prim.GetAttribute(name)
     if not attr.IsValid():
-        attr = prim.CreateAttribute(name, type_name or _type_for(value), custom=True)
+        attr = prim.CreateAttribute(name, type_name, custom=True)
     if isinstance(value, tuple):
         value = list(value)
     attr.Set(value)

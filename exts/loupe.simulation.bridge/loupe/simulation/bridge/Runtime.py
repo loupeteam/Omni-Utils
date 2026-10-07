@@ -52,13 +52,19 @@ def _option(options: dict, key: str, default):
 class Runtime:
     """
     One PLC. Construct it from a PlcConfig (read from the prim) and the
-    driver's spec; it builds the driver and starts polling at once, idle
-    until `enable_communication` is true.
+    driver's spec; it builds the driver and the PlcRuntime, idle. The System
+    calls `start()` once the listeners (delivery, bus adapter, mirror) are
+    attached, so the first CONNECTING, the first sample and the first problem
+    reach them; nothing is polled before that.
 
-    The 0.2.x property names (`enable_communication`, `refresh_rate`,
-    `read_variables`, `options`, `plc`, `driver`) are kept so scripts that
-    reached a vendor Runtime through `get_system().get_component(name)` keep
-    working.
+    What a 0.2.x script that reached a vendor Runtime through
+    `get_system().get_component(name)` still finds: `enable_communication`,
+    `refresh_rate` / `refresh_period_ms`, `read_variables`,
+    `set_read_variables`, `queue_write`, `is_connected`, `plc`, `driver`,
+    `name`. Narrower than 0.2.x: `options` returns the neutral keys with
+    `bridge:Variables` as a list, and the vendor properties (`ams_net_id`,
+    `host`, `port`) are gone; use `driver_options` / `set_driver_option` or
+    the driver object itself.
     """
 
     def __init__(self, name: str, config: PlcConfig, spec: DriverSpec, *,
@@ -87,6 +93,12 @@ class Runtime:
         self._plc.set_read_variables(config.variables)
         self._mirror = bool(config.mirror)
         self._mirror_symbols = list(config.mirror_symbols)
+        # Set by the System: called when the mirror settings change so the
+        # mirror component can be rebuilt.
+        self.on_mirror_changed = None
+
+    def start(self):
+        """Start polling. The System calls this after every listener is attached. Idempotent."""
         self._plc.start()
 
     def __del__(self):
@@ -174,12 +186,16 @@ class Runtime:
         value = option.coerce(value)
         if value is None or value == self._options.get(key):
             return False
-        self._options[key] = value
+        driver_value = value
         if option.secret:
-            if is_secret_reference(value):
-                self._secret_refs[key] = value
-            value = resolve_secrets(self._spec, {key: value})[key]
-        if self._spec.apply_option(self._driver, key, value):
+            # Resolve before anything is stored: a reference that does not
+            # resolve raises here and leaves the runtime (and what "Write To
+            # USD" would author) as it was.
+            driver_value = resolve_secrets(self._spec, {key: value})[key]
+        self._options[key] = value
+        if option.secret and is_secret_reference(value):
+            self._secret_refs[key] = value
+        if self._spec.apply_option(self._driver, key, driver_value):
             self._plc.reconnect()
         return True
 
@@ -222,10 +238,16 @@ class Runtime:
             # Replaces the cyclic read list, so a variable removed from the
             # prim stops being read.
             self.set_read_variables(value[ATTR_VARIABLES] or [])
+        mirror_changed = False
         if ATTR_MIRROR in value and value[ATTR_MIRROR] is not None:
+            mirror_changed |= self._mirror != bool(value[ATTR_MIRROR])
             self._mirror = bool(value[ATTR_MIRROR])
         if ATTR_MIRROR_SYMBOLS in value:
-            self._mirror_symbols = _as_list(value[ATTR_MIRROR_SYMBOLS])
+            symbols = _as_list(value[ATTR_MIRROR_SYMBOLS])
+            mirror_changed |= symbols != self._mirror_symbols
+            self._mirror_symbols = symbols
+        if mirror_changed and self.on_mirror_changed is not None:
+            self.on_mirror_changed()
 
     def _normalise(self, value: dict) -> dict:
         """Bring any accepted key spelling to the neutral one; driver options become `driver:<key>`."""
