@@ -65,6 +65,9 @@ try {
     Write-Host "mode   $(if ($Mode) { $Mode } else { 'live' })"
     Write-Host "log    $Log"
 
+    # Set for the Kit process only: restored below, so a second run from the same
+    # shell does not inherit this run's mode as its default.
+    $savedStage, $savedMode = $env:FIXCHECK_STAGE, $env:FIXCHECK_MODE
     $env:FIXCHECK_STAGE = $Stage
     $env:FIXCHECK_MODE = $Mode
     # Kit puts its working directory on sys.path. Run it from the temp folder so a
@@ -81,6 +84,7 @@ try {
     Pop-Location
 }
 finally {
+    $env:FIXCHECK_STAGE, $env:FIXCHECK_MODE = $savedStage, $savedMode
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 

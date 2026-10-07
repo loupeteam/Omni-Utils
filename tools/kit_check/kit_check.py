@@ -5,7 +5,8 @@ Run inside Kit with --exec (run.sh / run.ps1 do that). Environment:
   FIXCHECK_STAGE     stage to open; default stages/mixed_test.usda next to this file:
                      a legacy Beckhoff prim /PLC/PLC1 and a neutral B&R prim /PLC/BR1
   FIXCHECK_MODE      "" = live (Beckhoff against the PLC in the stage, B&R against a mock
-                     OMJSON server started here), "inject" = synthetic DATA_READ, no PLC
+                     OMJSON server started here), "inject" = no PLC: an in-memory fake driver
+                     is registered under both vendor names and answers the reads itself
   FIXCHECK_BR_TESTS  folder holding br_bridge's mock_omjson.py (default: found next to
                      the installed br_bridge checkout)
 Prints one line per check and "OK -- all fix checks passed" or "FAIL ...".
@@ -51,17 +52,79 @@ for e in known:
 if not any(e.get("enabled", False) for e in known):
     fails.append("extension not enabled")
 
-from loupe.simulation.bridge import Manager, get_plc, get_system, on_sample_main, registry  # noqa: E402
-from loupe.simulation.bridge.bus import EVENT_TYPE_DATA_READ, EVENT_TYPE_STATUS, get_stream_name  # noqa: E402
-from loupe.simulation.bridge.BridgeManager import Manager_Events  # noqa: E402
-from loupe.simulation.bridge.tests.vendor_drivers import register_vendor_drivers  # noqa: E402
-import plc_bridge  # noqa: E402
-from plc_bridge import Sample  # noqa: E402
+
+def quit_after(seconds):
+    # omni.kit.window.file cancels a headless quit on a dirty stage (the test
+    # edits the prims); do not let that, or a failed import, keep the process alive.
+    threading.Thread(target=lambda: (time.sleep(seconds), os._exit(7)), daemon=True).start()
+
+
+try:
+    from loupe.simulation.bridge import Manager, get_plc, get_system, on_sample_main, registry  # noqa: E402
+    from loupe.simulation.bridge.bus import EVENT_TYPE_DATA_READ, EVENT_TYPE_STATUS, get_stream_name  # noqa: E402
+    from loupe.simulation.bridge.BridgeManager import Manager_Events  # noqa: E402
+    from loupe.simulation.bridge.tests.vendor_drivers import register_vendor_drivers  # noqa: E402
+    import plc_bridge  # noqa: E402
+    from plc_bridge import Sample  # noqa: E402
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    print("FAIL -- import: {!r}".format(e), flush=True)
+    app.post_quit()
+    quit_after(15)
+    raise
 
 print("  startup      clean; plc_bridge from {}".format(os.path.dirname(plc_bridge.__file__)))
 
+
+class FakeDriver(plc_bridge.PlcDriver):
+    """Inject mode: answers the stage's symbols from memory, no PLC."""
+
+    symbol_separators = "."
+    values = {
+        "GVL_Moonlight.Command.Blend": 0.5, "GVL_Moonlight.Command.Busy": False, "GVL_Moonlight.Command.Enable": True,
+        "GVL_Moonlight.Axes[0].ActualPosition": 15.0, "GVL_Moonlight.Axes[1].ActualPosition": 16.0,
+        "TestProg:counter": 7, "TestProg:lreal": 1.5, "TestProg:bool": True,
+        "TestProg:structOfStructs": {"var1": 3, "secondStruct": {"bool": True}}, "TestProg:arr": [10.0, 11.0, 12.0],
+    }
+
+    def __init__(self, **options):
+        self.options = options
+        self.connected = False
+        self.reads = 0
+
+    def connect(self):
+        self.connected = True
+
+    def disconnect(self):
+        self.connected = False
+
+    def is_connected(self):
+        return self.connected
+
+    def read(self, symbols):
+        self.reads += 1
+        values = {s: self.values[s] for s in symbols if s in self.values}
+        errors = {s: "symbol not found" for s in symbols if s not in self.values}
+        return plc_bridge.ReadResult(values, errors)
+
+    def write(self, values):
+        self.values.update(values)
+        return {}
+
+
+class FakeBrDriver(FakeDriver):
+    symbol_separators = ":."
+
+
 # --- 2. drivers: registered by this script until Phase 4 moves it into the vendor exts
-drivers = register_vendor_drivers()
+if MODE == "inject":
+    from loupe.simulation.bridge.tests.vendor_drivers import BECKHOFF, BR
+    registry.register("beckhoff", FakeDriver, BECKHOFF["options"], legacy_namespace="beckhoff_bridge")
+    registry.register("br", FakeBrDriver, BR["options"], legacy_namespace="br_bridge")
+    drivers = {"beckhoff": True, "br": True, "fake": True}
+else:
+    drivers = register_vendor_drivers()
 print("  drivers      {}".format(drivers))
 if drivers.get("beckhoff") is not True or drivers.get("br") is not True:
     fails.append("vendor drivers not importable: {}".format(drivers))
@@ -182,18 +245,12 @@ async def main():
 
     frames0 = delivery.frames
     if MODE == "inject":
-        print("  mode         injecting synthetic DATA_READ events (no PLC)")
-        for i in range(6):
-            bus.push(event_type=get_stream_name(LEGACY_BK.EVENT_TYPE_DATA_READ, "PLC1"), payload={
-                "meta": {"name": "PLC1"},
-                "data": {"GVL_Moonlight": {"Axes": [{"ActualPosition": 15.0 + i}], "Command": {"Blend": 0.5}}}})
-            await app.next_update_async()
-    else:
-        bk.enable_communication = True
-        br.enable_communication = True
-        t0 = time.time()
-        while time.time() - t0 < LIVE_SEC:
-            await app.next_update_async()
+        print("  mode         inject: fake drivers under both vendor names, no PLC")
+    bk.enable_communication = True
+    br.enable_communication = True
+    t0 = time.time()
+    while time.time() - t0 < LIVE_SEC:
+        await app.next_update_async()
     frames = delivery.frames - frames0
     latest_bk, latest_br = bk.plc.latest(), br.plc.latest()
     print("  live {:.0f}s      PLC1: legacy bus={} neutral bus={} Manager(legacy)={} on_sample={} latest.seq={}".format(
@@ -208,7 +265,7 @@ async def main():
     print("  status       PLC1 {}".format(status["bk"][:6]))
     print("  status       BR1 neutral {}".format(status["br_neutral"][:3]))
     print("  status       BR1 legacy  {}".format(status["br_legacy"][:3]))
-    if MODE != "inject":
+    if True:  # both modes
         for key in ("bk_legacy", "bk_neutral", "bk_manager", "br_neutral", "br_legacy"):
             if counts[key] == 0:
                 fails.append("no DATA_READ on {}".format(key))
@@ -246,7 +303,7 @@ async def main():
         value = prim.GetAttribute("value").Get() if valid else None
         symbol = prim.GetAttribute("symbol").Get() if valid else None
         print("  mirror {} {} valid={} value={} symbol={}".format(label, path, valid, value, symbol))
-        if MODE != "inject" or label.startswith("PLC1"):
+        if True:
             if not valid or value is None:
                 fails.append("{} not mirrored at {}".format(label.strip(), path))
     br_lreal = stage.GetPrimAtPath("/PLC/BR1/TestProg/lreal")
@@ -267,9 +324,9 @@ async def main():
             await app.next_update_async()
         sent = [w for w in writes["bk"] if "GVL_Moonlight.Command.Blend" in w.values]
         print("  write-back   PLC1 value={} sent={}".format(new_value, sent[-1] if sent else writes["bk"]))
-        if MODE != "inject" and (not sent or sent[-1].error or sent[-1].errors):
+        if not sent or sent[-1].error or sent[-1].errors:
             fails.append("PLC1 write:value edit was not written")
-        if MODE != "inject":
+        if True:
             handle = bk.queue_write("GVL_Moonlight.Command.Blend", new_value)
             got = handle.wait(2.0)
             print("  write ack    PLC1 done={} ok={} error={}".format(got, handle.ok, handle.error))
@@ -357,9 +414,7 @@ async def run():
     sys.stdout.flush()
     print("posting quit at {}".format(time.time()), flush=True)
     app.post_quit()
-    # omni.kit.window.file cancels a headless quit on a dirty stage (the test
-    # edits the prims); do not let that keep the process alive.
-    threading.Thread(target=lambda: (time.sleep(15), os._exit(7)), daemon=True).start()
+    quit_after(15)
 
 
 asyncio.ensure_future(run())
