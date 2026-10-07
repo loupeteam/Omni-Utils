@@ -8,6 +8,7 @@ needed. tests/vendor_drivers.py registers the real drivers for the harness.
 """
 
 import os
+import tempfile
 import threading
 import time
 
@@ -20,7 +21,9 @@ from pxr import Sdf
 from plc_bridge import PlcDriver, ReadResult
 
 from .. import registry
-from ..bus import BUS_NAMESPACE, EVENT_TYPE_DATA_READ, EVENT_TYPE_STATUS, Manager, get_stream_name
+from ..bus import (
+    BUS_NAMESPACE, EVENT_TYPE_CONNECTION, EVENT_TYPE_DATA_INIT, EVENT_TYPE_DATA_READ, EVENT_TYPE_ENABLE,
+    EVENT_TYPE_STATUS, EVENT_TYPE_WRITE, Manager, get_stream_name)
 from ..BridgeManager import Manager_Events
 from ..delivery import get_system
 from ..registry import Option
@@ -89,6 +92,16 @@ async def ticks(n):
     app = omni.kit.app.get_app()
     for _ in range(n):
         await app.next_update_async()
+
+
+async def until(condition, seconds=3.0):
+    """Tick the app until condition() is true; False on timeout. No fixed waits."""
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        if condition():
+            return True
+        await ticks(1)
+    return condition()
 
 
 class BridgeTestCase(omni.kit.test.AsyncTestCase):
@@ -202,9 +215,9 @@ class TestDiscovery(BridgeTestCase):
                                 "fake_bridge:RefreshRate": 40, "fake_bridge:Variables": "GVL.a, GVL.b,"})
         self.define("/World/Other", {"foo:bar": 1})
         warned = set()
-        configs, unresolved = discover(self.stage, "/PLC/", warned)
+        configs, unresolved, invalid = discover(self.stage, "/PLC/", warned)
         self.assertEqual({c.name for c in configs}, {"N1", "L1"})
-        self.assertEqual(unresolved, {})
+        self.assertEqual((unresolved, invalid), ({}, {}))
         n1 = next(c for c in configs if c.name == "N1")
         l1 = next(c for c in configs if c.name == "L1")
         self.assertEqual((n1.driver, n1.legacy, n1.refresh_ms, n1.variables), ("fake", False, 30, ["GVL.a", "GVL.b"]))
@@ -318,48 +331,82 @@ class TestDelivery(BridgeTestCase):
 
 
 class TestBus(BridgeTestCase):
+    def _subscribe(self, name, got):
+        """Subscriptions on both namespaces, filled before the component exists."""
+        bus = omni.kit.app.get_app().get_message_bus_event_stream()
+        legacy = Manager_Events("fake_bridge")
+        pairs = [
+            ("neutral", EVENT_TYPE_DATA_READ, "data"), ("legacy", legacy.EVENT_TYPE_DATA_READ, "data"),
+            ("status_neutral", EVENT_TYPE_STATUS, "status"), ("status_legacy", legacy.EVENT_TYPE_STATUS, "status"),
+            ("init_neutral", EVENT_TYPE_DATA_INIT, "meta"), ("init_legacy", legacy.EVENT_TYPE_DATA_INIT, "meta"),
+            ("conn_neutral", EVENT_TYPE_CONNECTION, "status"), ("conn_legacy", legacy.EVENT_TYPE_CONNECTION, "status"),
+            ("enable_neutral", EVENT_TYPE_ENABLE, "status"), ("enable_legacy", legacy.EVENT_TYPE_ENABLE, "status"),
+            ("write", EVENT_TYPE_WRITE, "values"),
+        ]
+        subs = []
+        for key, event_type, field in pairs:
+            got.setdefault(key, [])
+            subs.append(bus.create_subscription_to_push_by_type(
+                get_stream_name(event_type, name),
+                lambda e, key=key, field=field: got[key].append(e.payload[field])))
+        return subs
+
     async def test_adapter_emits_neutral_and_legacy_names(self):
+        got = {}
+        subs = self._subscribe("B1", got)
+        manager = Manager("B1", namespace="fake_bridge")
+        manager.register_data_callback(lambda e: got.setdefault("manager", []).append(e.payload["meta"]["name"]))
+        # Subscribed before the runtime exists: the first events are not missed.
         self.define("/PLC/B1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
                                 ATTR_VARIABLES: ["GVL.a", "bad.x"], "bridge:MirrorToUsd": False})
         self.system.find_and_create_components()
-        bus = omni.kit.app.get_app().get_message_bus_event_stream()
-        legacy = Manager_Events("fake_bridge")
-        got = {"neutral": [], "legacy": [], "status_neutral": [], "status_legacy": [], "manager": []}
-        subs = [
-            bus.create_subscription_to_push_by_type(get_stream_name(EVENT_TYPE_DATA_READ, "B1"),
-                                                    lambda e: got["neutral"].append(e.payload["data"])),
-            bus.create_subscription_to_push_by_type(get_stream_name(legacy.EVENT_TYPE_DATA_READ, "B1"),
-                                                    lambda e: got["legacy"].append(e.payload["data"])),
-            bus.create_subscription_to_push_by_type(get_stream_name(EVENT_TYPE_STATUS, "B1"),
-                                                    lambda e: got["status_neutral"].append(e.payload["status"])),
-            bus.create_subscription_to_push_by_type(get_stream_name(legacy.EVENT_TYPE_STATUS, "B1"),
-                                                    lambda e: got["status_legacy"].append(e.payload["status"])),
-        ]
-        manager = Manager("B1", namespace="fake_bridge")
-        manager.register_data_callback(lambda e: got["manager"].append(e.payload["meta"]["name"]))
-        t0 = time.time()
-        while time.time() - t0 < 2.0 and not (got["neutral"] and got["legacy"] and got["status_legacy"] and got["manager"]):
-            await ticks(1)
-        self.assertTrue(got["neutral"] and got["legacy"] and got["manager"])
+        # DATA_INIT is pushed once per namespace when the adapter is built
+        self.assertEqual(got["init_neutral"], [{"name": "B1"}])
+        self.assertEqual(got["init_legacy"], [{"name": "B1"}])
+        self.assertTrue(await until(lambda: got["neutral"] and got["legacy"] and got.get("manager")
+                                    and got["status_legacy"] and "Connected" in got["conn_neutral"]))
         self.assertEqual(got["neutral"][0]["GVL"]["a"], 1.0)
         self.assertEqual(got["manager"][0], "B1")
-        self.assertTrue(got["status_neutral"])
+        # the very first connection events reached the listeners (start() after attach)
+        self.assertEqual(got["conn_neutral"][:2], ["Connecting", "Connected"])
+        self.assertEqual(got["conn_legacy"][:2], ["Connecting", "Connected"])
         problem = got["status_neutral"][0]
         self.assertEqual(problem["kind"], "read")
         self.assertIn("bad.x", problem["symbols"])
         self.assertIsInstance(got["status_legacy"][0], str)
         self.assertIn("bad.x", got["status_legacy"][0])
-        # requests arrive on both names
+        # requests arrive on both names; the WRITE event reports the flushed batch
         rt = self.system.get_component("B1")
         manager.write_variable("GVL.a", 9.0)
         Manager("B1").add_cyclic_read_variables(["GVL.b"])
-        t0 = time.time()
-        while time.time() - t0 < 2.0 and not rt.driver.writes:
-            await ticks(1)
+        self.assertTrue(await until(lambda: rt.driver.writes and got["write"]))
         self.assertEqual(rt.driver.writes[-1], {"GVL.a": 9.0})
+        self.assertEqual(dict(got["write"][-1]), {"GVL.a": 9.0})
         self.assertIn("GVL.b", rt.read_variables)
+        # ENABLE goes out on every assignment, on both names, with the value
+        before = len(got["enable_neutral"])
+        rt.enable_communication = False
+        self.assertEqual(got["enable_neutral"][before:], [{"enabled": False}])
+        self.assertEqual(got["enable_legacy"][-1], {"enabled": False})
+        self.assertTrue(await until(lambda: got["conn_neutral"][-1] == "Disconnected"))
+        self.assertEqual(got["conn_legacy"][-1], "Disconnected")
         manager.cleanup()
         subs.clear()
+
+    async def test_manager_on_the_neutral_namespace(self):
+        got = []
+        manager = Manager("B3")
+        manager.register_data_callback(lambda e: got.append(e.payload["data"]))
+        self.define("/PLC/B3", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        self.assertTrue(await until(lambda: got))
+        self.assertEqual(got[0], {"GVL": {"a": 1.0}})
+        rt = self.system.get_component("B3")
+        manager.write_variables({"GVL.a": 2.0, "GVL.b": 3.0})
+        self.assertTrue(await until(lambda: rt.driver.writes))
+        self.assertEqual(rt.driver.writes[-1], {"GVL.a": 2.0, "GVL.b": 3.0})
+        manager.cleanup()
 
     async def test_legacy_names_off_by_setting(self):
         self.settings.set(SETTING_LEGACY_BUS, False)
@@ -448,9 +495,135 @@ class TestMirror(BridgeTestCase):
                            mirror=False, mirror_symbols=["GVL.a"], options={"Address": "9.9.9.9", "Port": 2, "Token": "x"})
         prim = self.stage.DefinePrim("/PLC/R1", "Scope")
         author_config(prim, config, spec, {"Token": "env:T"})
-        configs, _ = discover(self.stage, "/PLC/", set())
+        configs, _, _ = discover(self.stage, "/PLC/", set())
         back = configs[0]
         self.assertEqual((back.enabled, back.refresh_ms, back.variables, back.mirror, back.mirror_symbols),
                          (True, 15, ["GVL.a"], False, ["GVL.a"]))
         self.assertEqual(back.options["Address"], "9.9.9.9")
         self.assertEqual(back.options["Token"], "env:T")
+
+
+class TestRobustness(BridgeTestCase):
+    async def test_malformed_prim_does_not_stop_the_others(self):
+        self.define("/PLC/Good1", {ATTR_DRIVER: "fake", "fake:Port": 3})
+        bad_port = self.define("/PLC/BadPort", {ATTR_DRIVER: "fake"})
+        bad_port.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("8000a")
+        bad_vars = self.define("/PLC/BadVars", {ATTR_DRIVER: "fake"})
+        bad_vars.CreateAttribute(ATTR_VARIABLES, Sdf.ValueTypeNames.Int, custom=True).Set(5)
+        self.define("/PLC/Good2", {ATTR_DRIVER: "fake", "fake:Port": 4})
+        names = self.system.find_and_create_components()
+        self.assertEqual(sorted(names), ["Good1", "Good2"])
+        self.assertEqual(sorted(self.system.invalid), ["/PLC/BadPort", "/PLC/BadVars"])
+        self.assertIn("8000a", self.system.invalid["/PLC/BadPort"])
+        self.assertEqual(self.system.get_component("Good2").driver.port, 4)
+
+    async def test_unresolvable_secret_is_reported_not_dropped(self):
+        os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
+        self.define("/PLC/S1", {ATTR_DRIVER: "fake", "fake:Token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"})
+        self.define("/PLC/S2", {ATTR_DRIVER: "fake"})
+        names = self.system.find_and_create_components()
+        self.assertEqual(names, ["S2"])
+        self.assertIn("/PLC/S1", self.system.invalid)
+        self.assertIn("LOUPE_BRIDGE_TEST_MISSING_TOKEN", self.system.invalid["/PLC/S1"])
+
+    async def test_set_driver_option_keeps_state_when_the_secret_fails(self):
+        os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "good"
+        os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
+        rt = self.system.add_component("S3", {"Token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
+        with self.assertRaises(LookupError):
+            rt.set_driver_option("Token", "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN")
+        self.assertEqual(rt.driver.token, "good")
+        self.assertEqual(rt.options["fake:Token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.system.write_options_to_stage("S3")
+        self.assertEqual(self.stage.GetPrimAtPath("/PLC/S3").GetAttribute("fake:Token").Get(),
+                         "env:LOUPE_BRIDGE_TEST_TOKEN")
+
+    async def test_write_to_usd_retypes_a_string_variables_attribute(self):
+        prim = self.define("/PLC/T1", {ATTR_DRIVER: "fake"})
+        prim.CreateAttribute(ATTR_VARIABLES, Sdf.ValueTypeNames.String, custom=True).Set("GVL.a, GVL.b")
+        self.system.find_and_create_components()
+        rt = self.system.get_component("T1")
+        self.assertEqual(rt.read_variables, ["GVL.a", "GVL.b"])
+        rt.set_read_variables(["GVL.c"])
+        self.system.write_options_to_stage("T1")
+        attr = prim.GetAttribute(ATTR_VARIABLES)
+        self.assertEqual(attr.GetTypeName(), Sdf.ValueTypeNames.StringArray)
+        self.assertEqual(list(attr.Get()), ["GVL.c"])
+
+    async def test_mirror_settings_change_rebuilds_the_mirror(self):
+        self.define("/PLC/M4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.a", "GVL.b"], ATTR_MIRROR_SYMBOLS: ["GVL.a"]})
+        self.system.find_and_create_components()
+        rt = self.system.get_component("M4")
+        first = self.system.get_part("M4", "mirror")
+        self.assertEqual(first.watch, ["GVL.a"])
+        self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M4/GVL/a").IsValid()))
+        self.assertFalse(self.stage.GetPrimAtPath("/PLC/M4/GVL/b").IsValid())
+        rt.options = {ATTR_MIRROR_SYMBOLS: ["GVL.b"]}
+        second = self.system.get_part("M4", "mirror")
+        self.assertIsNot(second, first)
+        self.assertEqual(second.watch, ["GVL.b"])
+        self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M4/GVL/b").IsValid()))
+        rt.options = {"bridge:MirrorToUsd": False}
+        self.assertIsNone(self.system.get_part("M4", "mirror"))
+        self.assertEqual(self.system.delivery.listeners("M4"), 0)
+        rt.options = {"bridge:MirrorToUsd": True}
+        self.assertIsNotNone(self.system.get_part("M4", "mirror"))
+
+    async def test_no_delivery_after_removal_from_inside_a_callback(self):
+        from .. import on_sample_main
+        self.define("/PLC/R1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 1,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        calls = []
+        later = []
+
+        def first(sample):
+            calls.append(sample.seq)
+            self.system.remove_component("R1")
+
+        remove_first = on_sample_main("R1", first)
+        remove_later = on_sample_main("R1", later.append)
+        self.assertTrue(await until(lambda: calls))
+        await ticks(10)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(later, [])
+        self.assertEqual(self.system.get_component_names(), [])
+        remove_first()
+        remove_later()
+
+    async def test_re_registration_rebuilds_components_on_the_new_class(self):
+        self.define("/PLC/RR1", {ATTR_DRIVER: "fake"})
+        self.system.find_and_create_components()
+        self.assertIs(type(self.system.get_component("RR1").driver), FakeDriver)
+
+        class FakeDriverV2(FakeDriver):
+            pass
+
+        registry.register("fake", FakeDriverV2, OPTIONS, legacy_namespace="fake_bridge")
+        rt = self.system.get_component("RR1")
+        self.assertIs(type(rt.driver), FakeDriverV2)
+        self.assertIsNotNone(self.system.get_part("RR1", "bus"))
+
+    async def test_stage_open_and_close_follow_the_extension(self):
+        if self.own_system:
+            self.skipTest("the extension is not running; stage events are its job")
+        folder = tempfile.mkdtemp(prefix="bridge_test_")
+        path = os.path.join(folder, "reload.usda").replace("\\", "/")
+        with open(path, "w") as f:
+            f.write('''#usda 1.0
+def Scope "PLC" {
+    def Scope "F1" {
+        custom string bridge:driver = "fake"
+        custom string[] bridge:Variables = ["GVL.a"]
+        custom bool bridge:MirrorToUsd = false
+    }
+}
+''')
+        await self.ctx.open_stage_async(path)
+        self.assertTrue(await until(lambda: self.system.get_component_names() == ["F1"]))
+        self.assertEqual(self.system.get_component("F1").read_variables, ["GVL.a"])
+        await self.ctx.close_stage_async()
+        self.assertTrue(await until(lambda: self.system.get_component_names() == []))
+        await self.ctx.new_stage_async()
+        self.stage = self.ctx.get_stage()
