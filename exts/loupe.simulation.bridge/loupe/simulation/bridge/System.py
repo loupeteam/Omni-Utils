@@ -223,7 +223,10 @@ class System:
         self.delivery.attach(name, runtime.plc)
         for kind in list(self._factories):
             self._build_part(component, kind)
-        runtime.on_mirror_changed = lambda name=name: self.rebuild_part(name, "mirror")
+        # The options setter may run on a worker thread; the mirror touches the
+        # stage, so its rebuild is marshalled to the next app update.
+        runtime.on_mirror_changed = lambda name=name: self.delivery.call_on_main(
+            lambda: self.rebuild_part(name, "mirror"))
         # Only now: every listener is in place for the first scan.
         runtime.start()
         return runtime
@@ -334,7 +337,15 @@ class System:
         found = classify(prim)
         if found is None or found[1] is None:
             return
-        config = read_config(prim, found[1], found[2], self._system_root)
+        try:
+            config = read_config(prim, found[1], found[2], self._system_root)
+        except Exception as e:
+            # Same guard as discovery: a malformed attribute is reported, not raised
+            # out of the "Update From USD" button.
+            self._invalid[runtime.path] = f"{type(e).__name__}: {e}"
+            logger.warning("%s: options not re-read: %s", runtime.path, e)
+            return
+        self._invalid.pop(runtime.path, None)
         runtime.options = config.to_options(found[1])
         self._components[name].config = config
 

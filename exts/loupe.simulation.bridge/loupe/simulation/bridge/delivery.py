@@ -86,6 +86,7 @@ class MainThreadDelivery:
         self._lock = threading.Lock()
         self._callbacks = {}      # name -> [callback]
         self._pending = {}        # name -> newest Sample since the last update
+        self._calls = []          # callables to run on the next update, main thread
         self._attached = {}       # name -> remover for the runtime's on_sample listener
         self._frames = 0
         self._delivered = 0
@@ -102,6 +103,7 @@ class MainThreadDelivery:
         with self._lock:
             self._pending.clear()
             self._callbacks.clear()
+            self._calls.clear()
 
     # Counters for the harness and the tests.
     frames = property(lambda self: self._frames, doc="App updates seen.")
@@ -147,8 +149,20 @@ class MainThreadDelivery:
             if name in self._attached and name in self._callbacks:
                 self._pending[name] = sample
 
+    def call_on_main(self, fn: Callable[[], None]):
+        """Run `fn()` on the main thread at the next app update. Safe from any thread."""
+        with self._lock:
+            self._calls.append(fn)
+
     def _on_update(self, event):
         self._frames += 1
+        with self._lock:
+            calls, self._calls = self._calls, []
+        for fn in calls:
+            try:
+                fn()
+            except Exception:
+                logger.exception("a call_on_main callable raised")
         with self._lock:
             if not self._pending:
                 return

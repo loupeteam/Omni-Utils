@@ -298,19 +298,64 @@ def _option_type(option: Option) -> Sdf.ValueTypeName:
     }[option.kind]
 
 
-def set_attr(prim: Usd.Prim, name: str, value, type_name: Optional[Sdf.ValueTypeName] = None):
-    type_name = type_name or _type_for(value)
-    attr = prim.GetAttribute(name)
-    if attr.IsValid() and attr.GetTypeName() != type_name:
-        # Authored with another type (bridge:Variables as a string, say): a
-        # Set() with the new value would be refused, so recreate it.
-        prim.RemoveProperty(name)
-        attr = prim.GetAttribute(name)
-    if not attr.IsValid():
-        attr = prim.CreateAttribute(name, type_name, custom=True)
+def _coerce_to_type(value, type_name: Sdf.ValueTypeName):
+    """Bring a value to an attribute's existing USD type; None when there is no sensible way."""
     if isinstance(value, tuple):
         value = list(value)
-    attr.Set(value)
+    name = str(type_name)
+    if name == "string":
+        return ",".join(str(v) for v in value) if isinstance(value, list) else str(value)
+    if name == "int":
+        return int(value)
+    if name == "double" or name == "float":
+        return float(value)
+    if name == "bool":
+        return bool(value)
+    if name == "string[]":
+        return [str(v) for v in (value if isinstance(value, list) else [value])]
+    return None
+
+
+def set_attr(prim: Usd.Prim, name: str, value, type_name: Optional[Sdf.ValueTypeName] = None) -> bool:
+    """
+    Set an attribute, creating it with `type_name` when the prim lacks it.
+
+    An attribute authored with another type (bridge:Variables as a string,
+    say) is recreated in the edit target; when the old type survives from a
+    stronger or weaker layer (a sublayer, a referenced asset) the value is
+    coerced to that type instead, and when it cannot be, the attribute is
+    skipped with a warning naming the layer. Never raises, so "Write To USD"
+    writes what it can.
+
+    Returns:
+        True when the value was written.
+    """
+    type_name = type_name or _type_for(value)
+    if isinstance(value, tuple):
+        value = list(value)
+    try:
+        attr = prim.GetAttribute(name)
+        if attr.IsValid() and attr.GetTypeName() != type_name:
+            prim.RemoveProperty(name)
+            attr = prim.GetAttribute(name)
+        if attr.IsValid() and attr.GetTypeName() != type_name:
+            # Still there: the type is authored in another layer.
+            coerced = _coerce_to_type(value, attr.GetTypeName())
+            stack = attr.GetPropertyStack()
+            layer = stack[0].layer.identifier if stack else "another layer"
+            if coerced is None:
+                logger.warning("%s.%s: authored as %s in %s, cannot store a %s there; skipped",
+                               prim.GetPath(), name, attr.GetTypeName(), layer, type_name)
+                return False
+            logger.warning("%s.%s: authored as %s in %s; written as that type",
+                           prim.GetPath(), name, attr.GetTypeName(), layer)
+            value = coerced
+        if not attr.IsValid():
+            attr = prim.CreateAttribute(name, type_name, custom=True)
+        return bool(attr.Set(value))
+    except Exception as e:
+        logger.warning("%s.%s: not written: %s", prim.GetPath(), name, e)
+        return False
 
 
 def author_config(prim: Usd.Prim, config: PlcConfig, spec: DriverSpec, secret_refs: Optional[dict] = None):
