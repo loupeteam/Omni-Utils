@@ -90,7 +90,9 @@ pytest
 
 ## Where this sits
 
-This package lives in Omni-Utils, which the vendor extensions still vendor as a
-git submodule, so an extension can load it with a `[[python.module]]` path into
-the submodule. The direction (framework extension, no submodule) is described in
+This package lives in Omni-Utils and is distributed as the `plc-bridge` wheel:
+`.github/workflows/plc-bridge.yml` tests it on Python 3.10 and 3.12, builds the
+wheel on every push, and publishes it to PyPI on a `plc-bridge-v<version>` tag
+once a `PYPI_TOKEN` secret exists. The vendor extensions list it as a pip
+requirement. The direction (framework extension, no submodule) is described in
 `docs/ARCHITECTURE_PLAN.md` of the Beckhoff bridge repo.
