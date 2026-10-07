@@ -88,6 +88,27 @@ handle = plc.queue_write("GVL.Command.Blend", 1.0)
 The 0.2.x `Manager("PLC1")` API is still there (`from loupe.simulation.bridge
 import Manager`) and talks on the neutral bus names.
 
+## Compatibility with 0.2.x
+
+**Do not enable a 0.2.x vendor extension (`loupe.simulation.beckhoff_bridge`
+0.2.x, `loupe.simulation.br_bridge` 0.1.x) alongside this one.** Both would
+own the same `/PLC` prims: two runtimes and two ADS connections per PLC,
+every bus event pushed twice, two mirrors fighting over the same prims, and
+a `write:value` edit written twice. Phase 4 ships thin vendor extensions
+that depend on this one and only register a driver; use those.
+
+What a 0.2.x script that reached the runtime through
+`get_system().get_component(name)` still finds: `enable_communication`,
+`refresh_rate` / `refresh_period_ms`, `read_variables`, `set_read_variables`,
+`queue_write`, `is_connected`, `plc`, `driver`, `name`. Narrower than 0.2.x:
+`options` returns the neutral keys (`bridge:Enable`, `bridge:RefreshRate`,
+`bridge:Variables` **as a list**, `bridge:MirrorToUsd`, `bridge:MirrorSymbols`,
+`<driver>:<Option>`), and the vendor properties `ams_net_id`, `host`, `port`
+are gone: read `driver_options` or the driver object (`runtime.driver.ams_net_id`),
+write with `set_driver_option("AmsNetId", ...)`. The options setter still
+accepts the 0.2.x keys (`beckhoff_bridge:Variables` as a comma-separated
+string).
+
 ## The USD mirror
 
 When `bridge:MirrorToUsd` is true (the default in 0.3; off by default from
@@ -141,7 +162,9 @@ registers both from their libraries.
 extension's `wheels/` folder: run `python tools/build_wheels.py` at the repo
 root before packaging. From a clone, `python tools/dev_link.py <kit build
 root>` installs the checkout editable into Kit's Python instead (see the
-repo README).
+repo README). One of the two is required: a clean clone with neither falls
+through to PyPI, where `plc-bridge==0.3.0rc1` does not exist, and the
+extension fails to start.
 
 ## Tests
 

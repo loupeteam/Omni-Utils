@@ -8,7 +8,7 @@ extension. Pick by what thread you are on and whether you need every sample.
 | `on_sample_main(name, cb)` | main, once per app update | the newest `Sample` since the last update | **the default for Kit code**: anything that touches the stage, `omni.ui`, or OmniGraph |
 | `get_plc(name).on_sample(cb)` | the PLC's worker thread, every sample | every `Sample`, at the scan rate | edge detection on short pulses, logging, anything that must not miss a packet and does not touch Kit objects |
 | `get_plc(name).latest()` | any | the newest `Sample` or `None` | pull from your own loop (a physics step, a timer); compare `seq` to see whether it is new |
-| the message bus (`Manager`, carb events) | the worker thread (pushes), your subscription's thread | the 0.2.x payloads: `data` nested, `status` text | scripts written against 0.2.x; code that must not import the extension |
+| the message bus (`Manager`, carb events) | the worker thread (pushes), your subscription's thread | `data` nested; `status` as the structured problem dict on the neutral names, as the 0.2.x text on the vendor names | scripts written against 0.2.x; code that must not import the extension |
 
 ## The Sample
 

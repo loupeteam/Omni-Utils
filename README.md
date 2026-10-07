@@ -45,7 +45,14 @@ Edits under `plc_bridge/src` are picked up on the next start. Add
 `--driver <path>` for each vendor driver checkout to link (`beckhoff_bridge/`,
 `br_bridge/` in their repos), which the tests and the harness need until Phase
 4 moves driver registration into the vendor extensions. `--uninstall` removes
-them again.
+them again (it leaves their dependencies, `pyads` and `websockets`, behind).
+`dev_link.py` needs Python 3.11 or newer to run (it reads `pyproject.toml`
+with `tomllib`); the Kit Python it installs into is 3.10+ as usual.
+
+One of the two is required. A clean clone with neither the wheel built nor
+the dev link falls through to PyPI, where `plc-bridge==0.3.0rc1` does not
+exist, and the extension fails to start; CI and registry packaging must run
+`tools/build_wheels.py` first.
 
 What Kit's pipapi does with a requirement that is already importable, and the
 working-directory trap for a bare package folder at the repo root, is recorded

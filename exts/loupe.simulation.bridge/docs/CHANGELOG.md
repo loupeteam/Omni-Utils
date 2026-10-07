@@ -43,6 +43,18 @@ vendor code behind a driver registry.
 - `plc-bridge` is a pip requirement pinned exactly by this extension; the
   wheel ships in `wheels/` until the package is on PyPI.
 
+### Compatibility
+- Do not enable a 0.2.x vendor extension next to this one: both own the same
+  legacy prims (two runtimes and two ADS connections per PLC, every bus event
+  twice, two mirrors, a `write:value` edit written twice). Phase 4 ships thin
+  vendor extensions that depend on this one.
+- `get_system().get_component(name)` keeps `enable_communication`,
+  `refresh_rate` / `refresh_period_ms`, `read_variables`,
+  `set_read_variables`, `queue_write`, `is_connected`, `plc`, `driver`,
+  `name`. `options` now returns the neutral keys with `bridge:Variables` as a
+  list; the vendor properties `ams_net_id`, `host`, `port` are gone (use
+  `driver_options`, `set_driver_option`, or the driver object).
+
 ### Deprecated
 - 0.2.x prims (`beckhoff_bridge:*`, `br_bridge:*`) are read as the matching
   driver with one warning per prim. 0.4 reads them only behind a setting;
