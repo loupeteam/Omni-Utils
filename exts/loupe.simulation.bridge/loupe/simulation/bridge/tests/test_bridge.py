@@ -700,3 +700,99 @@ def Scope "PLC" {
             await self.ctx.new_stage_async()
             self.stage = self.ctx.get_stage()
             shutil.rmtree(folder, ignore_errors=True)
+
+
+class TestWindowAndEdits(BridgeTestCase):
+    def _build_window(self):
+        import omni.ui as ui
+        from ..SystemUI import SystemUI
+        window = ui.Window("PLC Bridge test", width=400, height=400)
+        system_ui = SystemUI(self.system)
+        with window.frame:
+            with ui.VStack(height=0):
+                system_ui.build_ui()
+        return window, system_ui
+
+    async def test_stage_rebuild_moves_the_window_to_the_new_runtime(self):
+        from plc_bridge import EVENT_CONNECTION, EVENT_PROBLEM
+        self.define("/PLC/W1", {ATTR_DRIVER: "fake", "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        window, system_ui = self._build_window()
+        try:
+            old = self.system.get_component("W1")
+            self.assertIs(system_ui.active_runtime, old)
+            # what the extension does on a stage OPENED / CLOSED
+            self.system.cleanup()
+            self.system.find_and_create_components()
+            system_ui.on_system_rebuilt(visible=True)
+            new = self.system.get_component("W1")
+            self.assertIsNot(new, old)
+            self.assertIs(system_ui.active_runtime, new)
+            self.assertEqual(system_ui.components, ["W1"])
+            for kind in (EVENT_PROBLEM, EVENT_CONNECTION):
+                self.assertEqual(old.plc._listeners.get(kind, []), [])
+            self.assertIn(system_ui._on_connection, new.plc._listeners[EVENT_CONNECTION])
+            # a hidden window only lets go of the old runtime
+            self.system.cleanup()
+            self.system.find_and_create_components()
+            system_ui.on_system_rebuilt(visible=False)
+            self.assertIsNone(system_ui.active_runtime)
+            for kind in (EVENT_PROBLEM, EVENT_CONNECTION):
+                self.assertEqual(new.plc._listeners.get(kind, []), [])
+        finally:
+            system_ui.cleanup()
+            window.destroy()
+
+    async def test_add_component_from_the_window_reports_a_failure(self):
+        window, system_ui = self._build_window()
+        try:
+            system_ui._component_name_field.model.set_value("bad name")
+            system_ui.add_component()   # must not raise
+            self.assertTrue(any("bad name" in text for text in system_ui._status))
+            self.assertEqual(self.system.get_component_names(), [])
+        finally:
+            system_ui.cleanup()
+            window.destroy()
+
+    async def test_failed_add_component_leaves_no_prim(self):
+        os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
+        with self.assertRaises(LookupError):
+            self.system.add_component("A1", {"Token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"}, driver="fake")
+        self.assertFalse(self.stage.GetPrimAtPath("/PLC/A1").IsValid())
+        with self.assertRaises(Exception):
+            self.system.add_component("bad name", {}, driver="fake")
+        self.assertEqual(self.system.get_component_names(), [])
+        self.assertEqual(self.system.find_and_create_components(), [])
+
+    async def test_plain_secret_drops_the_old_reference(self):
+        os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "s3cret"
+        rt = self.system.add_component("P1", {"Token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
+        prim = self.stage.GetPrimAtPath("/PLC/P1")
+        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertTrue(rt.set_driver_option("Token", "typed-in"))
+        self.assertEqual(rt.driver.token, "typed-in")
+        self.assertNotIn("Token", rt.secret_refs)
+        prim.RemoveProperty("fake:Token")
+        self.system.write_options_to_stage("P1")
+        # neither the old reference nor the plain value is authored
+        self.assertFalse(prim.GetAttribute("fake:Token").IsValid())
+
+    async def test_write_once_or_unpause_without_a_value_sends_nothing(self):
+        self.define("/PLC/M6", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.a"]})
+        self.system.find_and_create_components()
+        rt = self.system.get_component("M6")
+        self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M6/GVL/a").IsValid()
+                                    and self.stage.GetPrimAtPath("/PLC/M6/GVL/a").GetAttribute("symbol").IsValid()))
+        prim = self.stage.GetPrimAtPath("/PLC/M6/GVL/a")
+        self.assertIsNone(prim.GetAttribute("write:value").Get())
+        prim.GetAttribute("write:once").Set(True)
+        self.assertFalse(prim.GetAttribute("write:once").Get())
+        prim.GetAttribute("write:pause").Set(True)
+        prim.GetAttribute("write:pause").Set(False)
+        await ticks(10)
+        self.assertEqual(rt.driver.writes, [])
+        # a value set afterwards still goes out
+        prim.GetAttribute("write:value").Set(4.0)
+        self.assertTrue(await until(lambda: rt.driver.writes))
+        self.assertEqual(rt.driver.writes[-1], {"GVL.a": 4.0})
