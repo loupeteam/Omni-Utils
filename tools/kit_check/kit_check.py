@@ -117,7 +117,7 @@ class FakeBrDriver(FakeDriver):
     symbol_separators = ":."
 
 
-# --- 2. drivers: registered by this script until Phase 4 moves it into the vendor exts
+# --- 2. drivers: registered by this script; the vendor extensions are not loaded
 if MODE == "inject":
     from loupe.simulation.bridge.tests.vendor_drivers import BECKHOFF, BR
     registry.register("beckhoff", FakeDriver, BECKHOFF["options"], legacy_namespace="beckhoff_bridge")

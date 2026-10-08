@@ -11,7 +11,7 @@ also pushes the driver's 0.2.x names (`loupe.simulation.beckhoff_bridge.*`,
 `loupe.simulation.br_bridge.*`) and accepts requests on both.
 
 `Manager` is the 0.2.x script API on top of the bus, on the neutral names.
-The vendor modules re-export it in Phase 4.
+The vendor modules re-export it for 0.2.x scripts.
 
 Bus payloads (`event.payload`):
 

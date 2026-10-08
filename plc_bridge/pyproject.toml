@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plc-bridge"
-version = "0.3.0rc1"
+version = "0.3.0"
 description = "Vendor-neutral PLC polling runtime and driver contract, with no Omniverse dependency"
 readme = "README.md"
 license = { text = "MIT" }

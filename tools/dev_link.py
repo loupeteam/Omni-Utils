@@ -7,8 +7,8 @@ makes Kit use the working tree directly: edit `plc_bridge/src` and restart
 the app, no wheel build.
 
 Vendor driver checkouts can be linked in the same call, which is how the
-tests and `tools/kit_check` get the Beckhoff and B&R drivers before the
-vendor extensions register them (Phase 4):
+tests and `tools/kit_check` get the Beckhoff and B&R drivers without loading
+the vendor extensions:
 
     python tools/dev_link.py <kit> --driver <path to beckhoff_bridge> --driver <path to br_bridge>
 
