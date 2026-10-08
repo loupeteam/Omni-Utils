@@ -36,7 +36,6 @@ from contextlib import contextmanager
 
 import numpy as np
 import omni.usd
-from omni.usd import StageEventType
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
 logger = logging.getLogger(__name__)
@@ -96,9 +95,8 @@ class RuntimeUsd:
         self._usd_context = omni.usd.get_context()
         self._stage = self._usd_context.get_stage()
 
-        self._stage_event_sub = (
-            self._usd_context.get_stage_event_stream().create_subscription_to_pop(self._on_stage_event)
-        )
+        # No stage-event subscription: the System drops every mirror when a
+        # stage is opened or closed and builds new ones on the new stage.
         # A write:value edit anywhere under the PLC prim becomes a write.
         self._stage_listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._notice_changed, self._stage)
         self._remove_delivery = delivery.on_sample_main(runtime.name, self._on_sample)
@@ -120,7 +118,6 @@ class RuntimeUsd:
     last_seq = property(lambda self: self._last_seq, doc="Sample.seq of the last sample mirrored.")
 
     def cleanup(self):
-        self._stage_event_sub = None
         self._stage_listener = None
         remove = getattr(self, "_remove_delivery", None)
         if remove is not None:
@@ -236,19 +233,13 @@ class RuntimeUsd:
                     if write_once_attr.Get():
                         with session_layer_context(self._stage):
                             write_once_attr.Set(False)
-                write_value_attr = prim.GetAttribute(ATTR_WRITE_VALUE)
-                self._runtime.queue_write(write_symbol.Get(), write_value_attr.Get())
+                value = prim.GetAttribute(ATTR_WRITE_VALUE).Get()
+                # write:value is declared without a value; nothing to send
+                # until the user sets one (write:once is reset above anyway).
+                if value is not None:
+                    self._runtime.queue_write(write_symbol.Get(), value)
 
     # endregion
-
-    def _on_stage_event(self, event):
-        if event.type == int(StageEventType.OPENED):
-            # A new stage means new prims and new attribute types, so a symbol
-            # that could not be written into the old one deserves another go.
-            self._unwritable.clear()
-            self._root_prim = None
-            self._stage = self._usd_context.get_stage()
-            self._stage_listener = Tf.Notice.Register(Usd.Notice.ObjectsChanged, self._notice_changed, self._stage)
 
 
 @contextmanager
