@@ -94,6 +94,7 @@ class RuntimeUsd:
 
         self._usd_context = omni.usd.get_context()
         self._stage = self._usd_context.get_stage()
+        self._stage_id = self._usd_context.get_stage_id()
 
         # No stage-event subscription: the System drops every mirror when a
         # stage is opened or closed and builds new ones on the new stage.
@@ -113,6 +114,19 @@ class RuntimeUsd:
             with session_layer_context(self._stage):
                 self._root_prim = self._stage.DefinePrim(self._root_prim_path)
         return self._root_prim
+
+    def _stage_live(self) -> bool:
+        """
+        True while this mirror's stage is the context's open stage. A stage
+        that is closing or being replaced is not expired yet, and writing to
+        it then crashed Kit; components created between CLOSING and OPENED
+        (a vendor's in-memory PLC) also hold the outgoing stage.
+        """
+        if self._stage is None or self._stage.expired:
+            return False
+        ctx = self._usd_context
+        return (ctx.get_stage_state() == omni.usd.StageState.OPENED
+                and ctx.get_stage_id() == self._stage_id)
 
     watch = property(lambda self: list(self._watch), doc="The watch list; empty means every symbol.")
     last_seq = property(lambda self: self._last_seq, doc="Sample.seq of the last sample mirrored.")
@@ -138,7 +152,7 @@ class RuntimeUsd:
 
     def _on_sample(self, sample):
         """Main thread, once per app update, with the newest sample."""
-        if self._stage is None or self._stage.expired:
+        if not self._stage_live():
             return
         self._last_seq = sample.seq
         flat = {}
@@ -192,7 +206,7 @@ class RuntimeUsd:
     # region - USD -> PLC
 
     def _notice_changed(self, notice, stage):
-        if self._stage.expired:
+        if not self._stage_live():
             return
         # Resetting write:once below edits the stage, which re-enters this
         # handler synchronously; without the guard the nested call sent the

@@ -394,6 +394,16 @@ class TestBus(BridgeTestCase):
         manager.cleanup()
         subs.clear()
 
+    async def test_manager_without_name_raises_cleanly(self):
+        # A failed __init__ must leave an object that __del__ can clean up, or
+        # Python prints an AttributeError on stderr, which omni.kit.test
+        # counts as a failure.
+        manager = Manager.__new__(Manager)
+        with self.assertRaises(ValueError):
+            manager.__init__("")
+        manager.cleanup()
+        self.assertEqual(manager._callbacks, [])
+
     async def test_manager_on_the_neutral_namespace(self):
         got = []
         manager = Manager("B3")
@@ -430,6 +440,43 @@ class TestMirror(BridgeTestCase):
                 return prim
             await ticks(1)
         return None
+
+    async def test_replace_stage_while_mirroring(self):
+        # The mirror's notice listener and per-frame writes must survive the
+        # stage being replaced under them while data flows: an exception in a
+        # Tf notice handler is logged as TF_PYTHON_EXCEPTION, which
+        # omni.kit.test counts as a failure.
+        self.define("/PLC/M9", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.a", "GVL.arr", "GVL.s"]})
+        self.system.find_and_create_components()
+        self.assertIsNotNone(await self._wait_for("/PLC/M9/GVL/a"))
+        for _ in range(3):
+            await self.ctx.new_stage_async()
+            await ticks(10)
+        self.stage = self.ctx.get_stage()
+        self.assertFalse(self.stage.GetPrimAtPath("/PLC/M9").IsValid())
+
+    async def test_replace_stage_while_mirroring_a_prim_less_component(self):
+        # A component created without a prim (a vendor's in-memory compat
+        # PLC), mirrored, re-created after every rescan the way the B&R
+        # compat module does, while the stage is replaced.
+        options = {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                   ATTR_VARIABLES: ["GVL.a", "GVL.arr", "GVL.s"]}
+        self.system.add_component("M8", options, author_prim=False)
+        self.assertIsNotNone(await self._wait_for("/PLC/M8/GVL/a"))
+        for rescan in ("refresh", "register", "stage", "stage"):
+            if rescan == "refresh":
+                self.system.find_and_create_components()
+            elif rescan == "register":
+                registry.register("fake", FakeDriver, OPTIONS, legacy_namespace="fake_bridge", title="Fake")
+            else:
+                await self.ctx.new_stage_async()
+                self.stage = self.ctx.get_stage()
+            await ticks(2)
+            if self.system.get_component("M8") is None:
+                self.system.add_component("M8", options, author_prim=False)
+            self.assertIsNotNone(await self._wait_for("/PLC/M8/GVL/a"), f"not mirrored after {rescan}")
+        self.system.remove_component("M8")
 
     async def test_watch_list_arrays_and_structs(self):
         self.define("/PLC/M1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
