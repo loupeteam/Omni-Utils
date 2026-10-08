@@ -1,7 +1,8 @@
 """
 Register the Beckhoff and B&R drivers from their libraries, for the tests and
-the headless harness. Phase 4 moves these registrations into the vendor
-extensions' on_startup; until then this is the only place they happen.
+the headless harness. The vendor extensions register them in their own
+on_startup; the tests here do not load those extensions, so they register the
+drivers from the libraries directly.
 
 The libraries come from `pip install` into Kit's Python (see
 tools/dev_link.py --driver); a missing one is skipped and reported.

@@ -94,8 +94,8 @@ import Manager`) and talks on the neutral bus names.
 0.2.x, `loupe.simulation.br_bridge` 0.1.x) alongside this one.** Both would
 own the same `/PLC` prims: two runtimes and two ADS connections per PLC,
 every bus event pushed twice, two mirrors fighting over the same prims, and
-a `write:value` edit written twice. Phase 4 ships thin vendor extensions
-that depend on this one and only register a driver; use those.
+a `write:value` edit written twice. The 0.3.0 vendor extensions depend on
+this one and only register a driver; use those.
 
 What a 0.2.x script that reached the runtime through
 `get_system().get_component(name)` still finds: `enable_communication`,
@@ -152,9 +152,10 @@ registry.register(
 per option, `arg` or the key in snake_case (`AmsNetId` -> `ams_net_id`); a
 changed option is assigned to the live driver as an attribute of the same
 name and the connection is reopened. `registry.unregister(name)` in
-`on_shutdown`. Until Phase 4 moves these calls into the vendor extensions,
+`on_shutdown`; the 0.3.0 vendor extensions do exactly that. This repo's
+tests and harness do not load them:
 `loupe.simulation.bridge.tests.vendor_drivers.register_vendor_drivers()`
-registers both from their libraries.
+registers both drivers from their libraries instead.
 
 ## Installing
 
@@ -163,7 +164,7 @@ extension's `wheels/` folder: run `python tools/build_wheels.py` at the repo
 root before packaging. From a clone, `python tools/dev_link.py <kit build
 root>` installs the checkout editable into Kit's Python instead (see the
 repo README). One of the two is required: a clean clone with neither falls
-through to PyPI, where `plc-bridge==0.3.0rc1` does not exist, and the
+through to PyPI, where `plc-bridge==0.3.0` does not exist, and the
 extension fails to start.
 
 ## Tests
