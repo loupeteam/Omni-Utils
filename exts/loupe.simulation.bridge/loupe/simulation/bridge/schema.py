@@ -189,11 +189,14 @@ def classify(prim: Usd.Prim):
         driver = str(driver).strip()
         return driver, registry.get(driver), False
     # No marker: a 0.2.x prim carries the vendor attributes under its namespace.
+    # Probed by name (the driver's options and the three neutral stand-ins), not
+    # by listing every attribute of every prim in the stage once per driver.
     for spec in registry.specs():
         if spec.legacy_namespace is None:
             continue
         prefix = spec.legacy_namespace + ":"
-        if any(prop.GetName().startswith(prefix) for prop in prim.GetAttributes()):
+        keys = [option.key for option in spec.options] + list(_LEGACY_NEUTRAL)
+        if any(prim.HasAttribute(prefix + key) for key in keys):
             return spec.name, spec, True
     return None
 
