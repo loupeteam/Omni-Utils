@@ -193,8 +193,13 @@ class Runtime:
             # USD" would author) as it was.
             driver_value = resolve_secrets(self._spec, {key: value})[key]
         self._options[key] = value
-        if option.secret and is_secret_reference(value):
-            self._secret_refs[key] = value
+        if option.secret:
+            if is_secret_reference(value):
+                self._secret_refs[key] = value
+            else:
+                # A plain value replaces the reference: "Write To USD" must not
+                # author the old reference back, nor the value (left off the prim).
+                self._secret_refs.pop(key, None)
         if self._spec.apply_option(self._driver, key, driver_value):
             self._plc.reconnect()
         return True
