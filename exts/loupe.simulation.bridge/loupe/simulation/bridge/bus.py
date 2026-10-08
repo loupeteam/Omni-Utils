@@ -170,12 +170,13 @@ class Manager(BridgeManager):
     """
 
     def __init__(self, name: str, namespace: str = BUS_NAMESPACE):
+        # First, so cleanup() from __del__ works even when the checks below raise
+        self._callbacks = []
         if not name:
             raise ValueError("Manager() needs the PLC name; the no-name form was removed in 0.3.0")
         self._plc_name = name
         self._events = Manager_Events(namespace)
         self._event_stream = omni.kit.app.get_app().get_message_bus_event_stream()
-        self._callbacks = []
         system = get_system()
         if system is not None and system.get_component(name) is None:
             logger.warning(

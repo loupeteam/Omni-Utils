@@ -260,7 +260,7 @@ def discover(stage: Usd.Stage, root: str = DEFAULT_ROOT, warned: Optional[set] =
         if legacy and warned is not None and path not in warned:
             warned.add(path)
             logger.warning(
-                "%s uses the 0.2.x '%s:*' attributes, which are DEPRECATED (0.3 reads them, "
+                "%s uses the legacy '%s:*' attributes, which are DEPRECATED (0.3 reads them, "
                 "0.4 only behind a setting, 0.5 not at all). Set '%s = \"%s\"', move the "
                 "vendor options to '%s:*' and use %s / %s / %s (a string[]) instead.",
                 path, spec.legacy_namespace, ATTR_DRIVER, spec.name, spec.namespace,
