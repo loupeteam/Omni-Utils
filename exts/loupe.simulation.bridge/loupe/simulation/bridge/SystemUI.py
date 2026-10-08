@@ -48,6 +48,7 @@ class SystemUI:
         self._removers = []
         self._frame = 0
         self._component_ui = None
+        self._component_dropdown = None
         self._status_field = None
         self._connection_field = None
         self._monitor_field = None
@@ -131,10 +132,36 @@ class SystemUI:
             return
         index = self._driver_dropdown.model.get_item_value_model().as_int
         driver = drivers[min(max(index, 0), len(drivers) - 1)]
-        self._system.add_component(name, {}, driver=driver)
+        try:
+            self._system.add_component(name, {}, driver=driver)
+        except Exception as e:
+            # A bad name, a driver that rejects its defaults: report it in the
+            # window; the System has left no prim behind.
+            logger.warning("Add component %r failed: %s", name, e)
+            self._add_status(f"Add {name}: {e}")
+            return
         self.components = self._system.get_component_names()
         update_combo_box(self._component_dropdown, self.components)
         self.select_component(name)
+
+    def on_system_rebuilt(self, visible: bool):
+        """
+        The System dropped its runtimes and built new ones (a stage was opened
+        or closed). The callbacks on the old, stopped runtime are removed;
+        with the window open the list and the panel are rebuilt from the new
+        runtimes, otherwise `build_ui` does that when the window next opens.
+        """
+        self._unsubscribe()
+        self._active = None
+        self._connection = "n/a"
+        if not visible or self._component_dropdown is None:
+            return
+        self.components = self._system.get_component_names()
+        update_combo_box(self._component_dropdown, self.components)
+        if self.components:
+            self.select_component(self.components[0])
+        elif self._component_ui is not None:
+            self._component_ui.clear()
 
     def refresh_components(self):
         self.components = self._system.find_and_create_components() or []

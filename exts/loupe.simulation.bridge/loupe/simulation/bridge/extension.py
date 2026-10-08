@@ -87,6 +87,8 @@ class Extension(omni.ext.IExt):
             # Drop the old runtimes and rebuild from whatever the (new) stage holds.
             self._system.cleanup()
             self._system.find_and_create_components()
+            # The window still points at the old runtimes; move it to the new ones.
+            self._ui.on_system_rebuilt(visible=bool(self._window and self._window.visible))
 
     def _on_window(self, visible):
         if self._window.visible:

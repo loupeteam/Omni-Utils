@@ -215,9 +215,16 @@ class System:
         spec = registry.get(config.driver)
         if spec is None:
             raise LookupError(f"{path}: no driver named {config.driver!r} is registered")
-        if author_prim:
-            self.create_component_prim(name, config, spec)
+        # The Runtime first: it raises on a secret that does not resolve or
+        # options the driver rejects, and nothing must be authored then.
         runtime = Runtime(name, config, spec, auto_connect=self.auto_connect)
+        if author_prim:
+            try:
+                self.create_component_prim(name, config, spec)
+            except Exception:
+                # An invalid prim path, say; the runtime was never started.
+                runtime.cleanup()
+                raise
         component = Component(runtime, config)
         self._components[name] = component
         self.delivery.attach(name, runtime.plc)
