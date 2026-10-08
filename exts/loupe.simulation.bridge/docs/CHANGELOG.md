@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Replacing the stage while a mirrored PLC was delivering data could crash
+  Kit: the mirror wrote a sample into the outgoing stage. The mirror now
+  writes and reacts to edits only while its stage is the context's open stage.
+- `Manager("")` raised before its subscription list existed, so `__del__`
+  printed an `AttributeError` that `omni.kit.test` counts as a failure.
+- The legacy-prim deprecation warning said "0.2.x" for every vendor; it now
+  says "legacy", which is also right for B&R's 0.1.x prims.
+
 ## [0.3.0-rc1] - 2026-10-07
 
 First release of the framework extension. Until now the files in this folder
