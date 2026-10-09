@@ -40,6 +40,12 @@ vendor code behind a driver registry.
   `TestProg:lreal` keeps its colon (0.2.x re-derived `TestProg.lreal`). Arrays
   read whole and `None`-padded arrays mirror as `_<index>` prims.
 - `bridge:MirrorSymbols` narrows the mirror to a watch list.
+- A sparse array (`Axes[2]` read, `Axes[0]` not) goes out on the bus as a
+  dict keyed by index strings, `{"2": {...}}`. That is what carb already made
+  of the `None`-padded list in 0.2.x, but carb logged a warning per missing
+  element per push, and Kit kept those log lines: the process grew about 1 MB
+  a minute while data flowed. `on_sample`, `on_sample_main` and `latest()`
+  still get the padded list.
 - The mirror writes, and reacts to edits, only while its stage is the
   context's open stage, so replacing the stage while a PLC is delivering data
   no longer writes into the outgoing stage.
