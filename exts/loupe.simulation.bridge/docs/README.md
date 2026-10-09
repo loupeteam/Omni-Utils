@@ -152,7 +152,14 @@ registry.register(
 per option, `arg` or the key in snake_case (`AmsNetId` -> `ams_net_id`); a
 changed option is assigned to the live driver as an attribute of the same
 name and the connection is reopened. `registry.unregister(name)` in
-`on_shutdown`; the 0.3.0 vendor extensions do exactly that. This repo's
+`on_shutdown`; the 0.3.0 vendor extensions do exactly that.
+
+The framework creates one driver per PLC prim and owns it: when the stage
+closes or the prim goes away it stops the runtime and then calls the driver's
+`close()` (`PlcDriver.close`, a no-op by default), on a thread of its own, so a
+PLC that stopped answering does not freeze the app for the driver's timeouts.
+A vendor extension also calls `check_extension_requirements(ext_id)` from its
+`on_startup` (see Installing). This repo's
 tests and harness do not load them:
 `loupe.simulation.bridge.tests.vendor_drivers.register_vendor_drivers()`
 registers both drivers from their libraries instead.
@@ -166,6 +173,18 @@ root>` installs the checkout editable into Kit's Python instead (see the
 repo README). One of the two is required: a clean clone with neither falls
 through to PyPI, where `plc-bridge==0.3.0` does not exist, and the
 extension fails to start.
+
+Kit's pip installer decides that a requirement is met when its module
+imports; it never compares versions. A package left in the app's pip folder
+by an earlier install (a release candidate, the previous release) is
+therefore used after an upgrade instead of the bundled wheel. At startup the
+framework compares `importlib.metadata.version()` of each pinned requirement
+with its pin, and the vendor extensions do the same for theirs through
+`loupe.simulation.bridge.check_extension_requirements(ext_id)`. A mismatch is
+logged as an error naming the package, the folder it was loaded from and how
+to clear it: normally quit Kit and delete
+`%LOCALAPPDATA%\ov\data\Kit\<app>\<version>\pip3-envs\<env>`, which makes
+Kit install the bundled versions again on the next start.
 
 ## Tests
 

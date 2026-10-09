@@ -181,8 +181,13 @@ class PlcRuntime:
 
     One worker thread per PLC: every `refresh_ms` it flushes the queued writes
     and then reads the variable list, in that order, so the sample that follows
-    a write reflects it. The thread is a daemon, and stop() returns within
-    JOIN_TIMEOUT_SEC whether or not it has.
+    a write reflects it. The thread is a daemon. stop() waits at most
+    JOIN_TIMEOUT_SEC for it and then disconnects, so it returns within
+    JOIN_TIMEOUT_SEC plus the driver's disconnect bound (see stop()).
+
+    The runtime does not own the driver's lifetime: stop() disconnects but
+    never calls `driver.close()`, because a runtime can be started again. The
+    host that created the driver calls `driver.close()` after its last stop().
 
     Listeners are called **on the worker thread**. A host with a main thread
     (a UI, Omniverse Kit) has to marshal to it itself, or poll `latest()` from
@@ -198,6 +203,7 @@ class PlcRuntime:
         handle.wait(1.0); print(handle.ok)
         ...
         plc.stop()
+        plc.driver.close()   # done with this driver for good
     """
 
     def __init__(self, driver: PlcDriver, name: str = "PLC1", refresh_ms: float = 20,
@@ -412,11 +418,21 @@ class PlcRuntime:
 
     def stop(self):
         """
-        Stop the worker thread and disconnect. Returns within JOIN_TIMEOUT_SEC:
-        the worker can be inside a driver call that takes seconds when the PLC
-        has gone away, and the caller is often a UI thread. A worker that
-        outlives the join exits on its own when the driver call returns.
-        Pending writes are resolved with error "stopped".
+        Stop the worker thread and disconnect. Pending writes are resolved
+        with error "stopped". The driver is not closed (see the class doc).
+
+        Worst case: JOIN_TIMEOUT_SEC plus one `driver.disconnect()`. The worker
+        can be inside a driver call that takes seconds when the PLC has gone
+        away, so stop() waits at most JOIN_TIMEOUT_SEC for it; a worker that
+        outlives the join exits on its own when the driver call returns. Then
+        stop() calls `disconnect()` itself, which closes the link and unblocks
+        that call; the contract bounds it to a few seconds. With the bundled
+        drivers: AdsDriver closes a local ADS port (milliseconds); BrDriver
+        waits up to its `timeout` + 1 s (4 s by default) for a close handshake
+        a PLC that stopped answering never sends.
+
+        A host whose caller must not block that long (a UI or render thread)
+        calls stop() from a thread of its own.
         """
         with self._lifecycle_lock:
             run, self._run = self._run, None

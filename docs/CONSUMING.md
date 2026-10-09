@@ -66,6 +66,12 @@ A listener that raises is logged and does not disturb the polling. To get the
 data onto the main thread yourself, store it and read it from an
 `omni.kit.app` update subscription, which is what `on_sample_main` does.
 
+Branch on `Problem.kind` (`connect`, `read`, `write`, `ok`) and
+`Problem.symbols`, never on `Problem.text`: the text carries the driver's own
+wording ("symbol not found" from ADS, "undefined" from OMJSON, exception
+messages that change between library versions), so the same failure reads
+differently on another vendor. The text is for people.
+
 `latest()` is the pull form: cheap, thread-safe, returns the same object until
 a new read lands. A physics callback at 240 Hz against a 50 Hz PLC reads the
 same sample four or five times; compare `seq`.
@@ -105,7 +111,8 @@ m.write_variable("GVL.Command.Blend", 1.0)
 The pushes happen on the worker thread, so a bus subscriber runs there too
 (the same rules as a worker-thread callback). `STATUS` carries the structured
 `Problem` (`{"kind", "text", "symbols"}`) on the neutral name and the text on
-a vendor name.
+a vendor name. As with `on_problem`, branch on `kind` and `symbols`; the text
+differs between vendors.
 
 ## Thread rules, summarised
 

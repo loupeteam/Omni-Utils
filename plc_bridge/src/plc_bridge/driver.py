@@ -21,8 +21,10 @@ class ReadResult:
         values: flat symbol name -> value, exactly as the symbols were requested
             ("GVL.Axes[0].Pos", "Program:struct.member"). The runtime does the
             nesting, so every vendor's data has the same shape. A value may
-            itself be a dict or list when the vendor reads a whole struct or
-            array as one symbol.
+            itself be a list or dict when the vendor reads a whole array or
+            struct as one symbol: B&R (OMJSON) returns both whole; ADS returns
+            arrays of a primitive type as lists, and a struct only when the
+            driver has a pyads structure_def for it.
         errors: symbol name -> reason, for symbols the PLC rejected. A symbol is
             in one of the two dicts, never both. An error is never delivered as
             a value.
@@ -63,6 +65,12 @@ class PlcDriver(ABC):
       the dict returned by `write`. A failure of the connection or the whole
       request raises; the runtime reports it, asks `is_connected()`, and either
       keeps polling or reconnects.
+    * **Closed once, by the host.** `disconnect` leaves the driver reusable
+      (the runtime reconnects through it). `close` releases what the driver
+      holds for its whole life, such as the event-loop thread of an async
+      transport. The runtime never calls it: a PlcRuntime can be started again
+      after stop(). Whoever created the driver calls `close()` once it is done
+      with it, after the runtime's stop().
     """
 
     #: Characters that separate the parts of a symbol name for this vendor.
@@ -82,6 +90,15 @@ class PlcDriver(ABC):
         while a `connect` is in progress on the worker (a worker the runtime
         gave up on may still be inside `connect` when stop() closes the link);
         never raises.
+        """
+
+    def close(self) -> None:
+        """
+        Release everything the driver holds; it is not used again afterwards.
+        Called by the host that created the driver, after PlcRuntime.stop()
+        (which has already disconnected). Safe to call more than once, bounded
+        like `disconnect`, never raises. The default does nothing, which is
+        right for a driver without threads or event loops of its own.
         """
 
     @abstractmethod
