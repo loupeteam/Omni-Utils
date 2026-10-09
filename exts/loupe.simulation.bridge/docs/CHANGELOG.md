@@ -45,6 +45,9 @@ vendor code behind a driver registry.
   no longer writes into the outgoing stage.
 - `plc-bridge` is a pip requirement pinned exactly by this extension; the
   wheel ships in `wheels/` until the package is on PyPI.
+- Closing or replacing the stage no longer waits on the PLCs: each runtime is
+  stopped and its driver closed on a thread of its own. Before, a B&R PLC
+  that stopped answering held the main thread for 5 s per PLC.
 
 ### Compatibility
 - Do not enable a 0.2.x vendor extension next to this one: both own the same

@@ -13,6 +13,8 @@ The message bus and the USD mirror are separate components built on top of it
 """
 
 import logging
+import threading
+import time
 from typing import Optional
 
 from plc_bridge import PlcRuntime
@@ -36,6 +38,28 @@ HELD_BY_AUTO_CONNECT = (
     "the prim has bridge:Enable = true, but the app setting "
     "/exts/loupe.simulation.bridge/autoConnect is false; enable it here or in code"
 )
+
+
+# Closes running on threads of their own (Runtime.cleanup(wait=False)), so
+# the extension's shutdown can give the healthy ones a moment to finish.
+_closers = set()
+_closers_lock = threading.Lock()
+
+
+def wait_for_closers(timeout: float) -> bool:
+    """
+    Wait up to `timeout` seconds in total for background closes to finish.
+
+    Returns:
+        True when none is left running.
+    """
+    deadline = time.monotonic() + timeout
+    with _closers_lock:
+        pending = list(_closers)
+    for thread in pending:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with _closers_lock:
+        return not any(t.is_alive() for t in _closers)
 
 
 def _option(options: dict, key: str, default):
@@ -102,20 +126,64 @@ class Runtime:
         self._plc.start()
 
     def __del__(self):
+        # Synchronous: a thread started from a finaliser can outlive the
+        # interpreter. A runtime the System cleaned up is already done.
         self.cleanup()
 
-    def cleanup(self):
-        """Stop polling and release the driver. Safe to call more than once."""
+    def cleanup(self, wait: bool = True) -> Optional[threading.Thread]:
+        """
+        Stop polling, then close the driver (`PlcDriver.close()`: the
+        framework created it, so the framework closes it). Safe to call more
+        than once; only the first call does anything.
+
+        Args:
+            wait: True does it on the calling thread. That can take
+                plc_bridge's JOIN_TIMEOUT_SEC (2 s) plus the driver's
+                disconnect bound when the PLC stopped answering: 5 s for a B&R
+                PLC in the worst case. False does it on a daemon thread and
+                returns at once; the System uses that on stage changes, so a
+                silent PLC does not freeze the app.
+
+        Returns:
+            The closing thread when wait is False and there was something to
+            close, else None.
+        """
+        if getattr(self, "_closing", False):
+            return None
+        self._closing = True
+        if wait:
+            self._close()
+            return None
+        thread = threading.Thread(target=self._close_in_background,
+                                  name=f"{self._name}-close", daemon=True)
+        with _closers_lock:
+            _closers.add(thread)
+        thread.start()
+        return thread
+
+    def _close_in_background(self):
+        try:
+            self._close()
+        finally:
+            with _closers_lock:
+                _closers.discard(threading.current_thread())
+
+    def _close(self):
         plc = getattr(self, "_plc", None)  # __init__ may have failed before it existed
         if plc is not None:
-            plc.stop()
-        driver = getattr(self, "_driver", None)
-        # A driver on an async transport owns an event-loop thread; stop() only
-        # disconnects. close() ends the thread so a runtime torn down on every
-        # stage open/close does not leave one behind.
-        if driver is not None and hasattr(driver, "close"):
             try:
-                driver.close()
+                plc.stop()
+            except Exception:
+                logger.exception("%s: stop failed", self._name)
+        driver = getattr(self, "_driver", None)
+        # stop() only disconnects; a driver on an async transport also owns an
+        # event-loop thread that close() ends, so a runtime torn down on every
+        # stage open/close does not leave one behind. Checked with getattr: a
+        # registered class need not derive from PlcDriver.
+        close = getattr(driver, "close", None)
+        if close is not None:
+            try:
+                close()
             except Exception:
                 logger.exception("%s: driver close failed", self._name)
 
