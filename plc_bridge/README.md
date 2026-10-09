@@ -48,18 +48,20 @@ marshals to it itself, or polls `latest()` from its own loop.
 ## Writing a driver
 
 Subclass `PlcDriver` and implement `connect`, `disconnect`, `is_connected`,
-`read(symbols) -> ReadResult` and `write(values) -> errors`. The rules, from
-the class docstring:
+`read(symbols) -> ReadResult` and `write(values) -> errors`; override `close`
+when the driver holds something for its whole life (an event-loop thread).
+The rules, from the class docstring:
 
 | Rule | Meaning |
 |---|---|
 | Synchronous | Every method blocks. A driver on an async transport (websockets) owns its event loop on a thread of its own and hides it. |
-| Bounded | Every method returns or raises within a timeout the driver chooses, a few seconds at most, and `disconnect` unblocks a call in flight (or the transport timeout is short enough to stand in for that). `stop()` waits two seconds, then closes the connection itself. |
+| Bounded | Every method returns or raises within a timeout the driver chooses, a few seconds at most, and `disconnect` unblocks a call in flight (or the transport timeout is short enough to stand in for that). `stop()` waits two seconds for the worker, then calls `disconnect` itself. |
 | One caller at a time | `connect`, `read` and `write` come from the runtime's single worker, in turn: writes first, then the read, every period. Only `disconnect` may arrive from another thread, while a call is in flight. |
 | Stateless read list | The symbols arrive with each `read`, never empty. |
 | One call, any number of requests | The driver may split a batch as its transport requires. |
-| Flat in, flat out | `ReadResult.values` is flat symbol name to value (a value may itself be a struct or list the vendor read whole). The runtime nests it, so every vendor's data has the same shape. |
+| Flat in, flat out | `ReadResult.values` is flat symbol name to value. The runtime nests it, so every vendor's data has the same shape. A value may itself be a list or dict when the vendor reads a whole array or struct as one symbol: B&R (OMJSON) returns structs and arrays whole; ADS returns arrays of a primitive type as a list, but a struct only when the driver was given a pyads `structure_def` for it, so with ADS read struct members one by one. |
 | Errors are not values | A symbol the PLC rejects goes in `ReadResult.errors`, or in the dict `write` returns. A failed connection or request raises; the runtime then asks `is_connected()` and reconnects if the transport is gone. |
+| Closed by the host | `disconnect` leaves the driver reusable; `close` (default: nothing) releases what it holds for good. The runtime never calls `close`, since it can be started again; whoever created the driver calls it after the last `stop()`. |
 | `symbol_separators` | `"."` for Beckhoff (`GVL.struct.member`), `":."` for B&R (`Program:struct.member`). |
 
 ## Data shape

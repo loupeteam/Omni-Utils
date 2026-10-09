@@ -21,8 +21,10 @@ class ReadResult:
         values: flat symbol name -> value, exactly as the symbols were requested
             ("GVL.Axes[0].Pos", "Program:struct.member"). The runtime does the
             nesting, so every vendor's data has the same shape. A value may
-            itself be a dict or list when the vendor reads a whole struct or
-            array as one symbol.
+            itself be a list or dict when the vendor reads a whole array or
+            struct as one symbol: B&R (OMJSON) returns both whole; ADS returns
+            arrays of a primitive type as lists, and a struct only when the
+            driver has a pyads structure_def for it.
         errors: symbol name -> reason, for symbols the PLC rejected. A symbol is
             in one of the two dicts, never both. An error is never delivered as
             a value.
