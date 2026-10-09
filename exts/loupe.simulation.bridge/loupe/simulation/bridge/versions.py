@@ -96,6 +96,10 @@ def _matches(installed: str, op: str, wanted: str) -> bool:
     if op == ">":
         return have > want
     if op == "<":
+        # PEP 440: "<0.4" excludes the pre-releases of 0.4 itself (0.4.0rc1),
+        # unless the bound is a pre-release.
+        if want[1] == (1, 0, 0) and want[3] == float("inf") and have[0] == want[0] and have[1] != (1, 0, 0):
+            return False
         return have < want
     if op == "~=":
         # Compatible release: the clause's own digits, trailing zeros kept
