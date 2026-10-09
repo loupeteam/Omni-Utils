@@ -929,6 +929,66 @@ class TestPackageSurface(omni.kit.test.AsyncTestCase):
         self.assertIs(bridge.legacy_bus_names_enabled, bus.legacy_bus_names_enabled)
         self.assertIs(bridge.Manager_Events, BridgeManager.Manager_Events)
         self.assertEqual(bridge.BUS_NAMESPACE, "bridge")
-        for name in ("Manager", "get_system", "registry"):
+        for name in ("Manager", "get_system", "registry", "check_extension_requirements"):
             self.assertTrue(hasattr(bridge, name), name)
 
+
+class TestVersionCheck(omni.kit.test.AsyncTestCase):
+    """The startup check against a faked installed version (pipapi never compares versions)."""
+
+    async def setUp(self):
+        from .. import versions
+        self.versions = versions
+        self._saved = (versions._installed_version, versions._installed_location)
+
+    async def tearDown(self):
+        self.versions._installed_version, self.versions._installed_location = self._saved
+
+    def _fake(self, installed, location):
+        self.versions._installed_version = lambda dist: installed[dist]
+        self.versions._installed_location = lambda dist: location
+
+    async def test_the_framework_pin_matches_what_is_installed(self):
+        import omni.kit.app
+        manager = omni.kit.app.get_app().get_extension_manager()
+        ext_id = manager.get_enabled_extension_id("loupe.simulation.bridge")
+        requirements = self.versions.extension_requirements(ext_id)
+        self.assertTrue(any(r.startswith("plc-bridge==") for r in requirements), requirements)
+        logged = []
+        self.assertEqual(self.versions.check_extension_requirements(ext_id, log=logged.append), [])
+        self.assertEqual(logged, [])
+
+    async def test_a_stale_package_is_reported_with_the_folder_to_clear(self):
+        import omni.kit.app
+        manager = omni.kit.app.get_app().get_extension_manager()
+        ext_id = manager.get_enabled_extension_id("loupe.simulation.bridge")
+        env = os.path.join("C:\\", "Users", "u", "AppData", "Local", "ov", "data", "Kit", "app", "1.0",
+                           "pip3-envs", "default-3.12")
+        self._fake({"plc-bridge": "0.3.0rc1"}, env)
+        logged = []
+        problems = self.versions.check_extension_requirements(ext_id, log=logged.append)
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(logged, problems)
+        self.assertIn("plc-bridge 0.3.0rc1", problems[0])
+        self.assertIn("loupe.simulation.bridge needs plc-bridge==", problems[0])
+        self.assertIn("delete the folder " + env, problems[0])
+
+    async def test_ranges_and_unpinned_requirements(self):
+        self._fake({"beckhoff-bridge": "0.3.1", "br-bridge": "0.4.0", "pyads": "3.6.0"}, None)
+        logged = []
+        problems = self.versions.check_requirements(
+            ["pyads", "beckhoff-bridge>=0.3.0,<0.4", "br-bridge>=0.3.0,<0.4"], "vendor", log=logged.append)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("br-bridge 0.4.0", problems[0])
+        self.assertIn("pip uninstall br-bridge", problems[0])
+
+    async def test_version_ordering(self):
+        satisfies = self.versions.satisfies
+        self.assertFalse(satisfies("0.3.0rc1", "==0.3.0"))
+        self.assertFalse(satisfies("0.3.0rc1", ">=0.3.0,<0.4"))
+        self.assertTrue(satisfies("0.3.0", "==0.3"))
+        self.assertTrue(satisfies("0.3.9", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.4.0", ">=0.3.0,<0.4"))
+        self.assertTrue(satisfies("0.3.0.post1", ">0.3.0"))
+        self.assertFalse(satisfies("0.4.0", "~=0.3.0"))
+        self.assertTrue(satisfies("0.3.4", "~=0.3.0"))

@@ -12,6 +12,8 @@ Public surface, re-exported here:
     Manager    the 0.2.x bus-based API, on the neutral bus names
     Manager_Events, get_stream_name, legacy_bus_names_enabled, BUS_NAMESPACE
                the bus names, for the vendor extensions' deprecated modules
+    check_extension_requirements(ext_id)
+               the pip version check vendor extensions run in on_startup
 """
 
 import sys as _sys
@@ -34,4 +36,5 @@ from .registry import Option, DriverSpec  # noqa: E402,F401
 from .delivery import get_system, get_plc, on_sample_main  # noqa: E402,F401
 from .bus import (  # noqa: E402,F401
     BUS_NAMESPACE, Manager, Manager_Events, get_stream_name, legacy_bus_names_enabled)
+from .versions import check_extension_requirements  # noqa: E402,F401
 from .extension import *  # noqa: E402,F401,F403

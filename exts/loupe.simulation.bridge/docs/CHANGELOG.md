@@ -31,6 +31,15 @@ vendor code behind a driver registry.
   the framework builds a field per option of the schema.
 - Kit tests (`omni.kit.test`) and the headless harness `tools/kit_check`
   with a mixed stage (a legacy Beckhoff prim and a neutral B&R prim).
+- `PlcDriver.close()` in the `plc-bridge` contract (no-op by default): the
+  framework calls it after stopping a runtime, since it created the driver.
+- Startup version check: the framework compares the installed `plc-bridge`
+  with its pin and logs an error naming the stale pip folder on a mismatch
+  (Kit's pip installer checks imports, never versions);
+  `check_extension_requirements(ext_id)` does the same for vendor extensions.
+- The package re-exports `get_stream_name`, `legacy_bus_names_enabled` and
+  `Manager_Events` for the vendor extensions' deprecated modules; the
+  submodule paths keep working.
 
 ### Changed
 - The USD mirror is a registered component, created when `bridge:MirrorToUsd`

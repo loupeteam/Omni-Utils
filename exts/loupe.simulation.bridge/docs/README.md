@@ -174,6 +174,18 @@ repo README). One of the two is required: a clean clone with neither falls
 through to PyPI, where `plc-bridge==0.3.0` does not exist, and the
 extension fails to start.
 
+Kit's pip installer decides that a requirement is met when its module
+imports; it never compares versions. A package left in the app's pip folder
+by an earlier install (a release candidate, the previous release) is
+therefore used after an upgrade instead of the bundled wheel. At startup the
+framework compares `importlib.metadata.version()` of each pinned requirement
+with its pin, and the vendor extensions do the same for theirs through
+`loupe.simulation.bridge.check_extension_requirements(ext_id)`. A mismatch is
+logged as an error naming the package, the folder it was loaded from and how
+to clear it: normally quit Kit and delete
+`%LOCALAPPDATA%\ov\data\Kit\<app>\<version>\pip3-envs\<env>`, which makes
+Kit install the bundled versions again on the next start.
+
 ## Tests
 
 Kit tests (`omni.kit.test`) under `loupe/simulation/bridge/tests/` against a
