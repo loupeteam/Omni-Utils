@@ -10,6 +10,8 @@ Public surface, re-exported here:
     Option     one entry of a driver's option schema
     get_system(), get_plc(name), on_sample_main(name, cb)   data delivery
     Manager    the 0.2.x bus-based API, on the neutral bus names
+    Manager_Events, get_stream_name, legacy_bus_names_enabled, BUS_NAMESPACE
+               the bus names, for the vendor extensions' deprecated modules
 """
 
 import sys as _sys
@@ -30,5 +32,6 @@ del _mod, _sys
 from . import registry  # noqa: E402,F401
 from .registry import Option, DriverSpec  # noqa: E402,F401
 from .delivery import get_system, get_plc, on_sample_main  # noqa: E402,F401
-from .bus import Manager, Manager_Events, BUS_NAMESPACE  # noqa: E402,F401
+from .bus import (  # noqa: E402,F401
+    BUS_NAMESPACE, Manager, Manager_Events, get_stream_name, legacy_bus_names_enabled)
 from .extension import *  # noqa: E402,F401,F403

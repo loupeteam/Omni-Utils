@@ -919,3 +919,16 @@ class TestWindowAndEdits(BridgeTestCase):
         prim.GetAttribute("write:value").Set(4.0)
         self.assertTrue(await until(lambda: rt.driver.writes))
         self.assertEqual(rt.driver.writes[-1], {"GVL.a": 4.0})
+
+
+class TestPackageSurface(omni.kit.test.AsyncTestCase):
+    async def test_names_the_vendor_modules_use_are_exported(self):
+        import loupe.simulation.bridge as bridge
+        from .. import bus, BridgeManager
+        self.assertIs(bridge.get_stream_name, bus.get_stream_name)
+        self.assertIs(bridge.legacy_bus_names_enabled, bus.legacy_bus_names_enabled)
+        self.assertIs(bridge.Manager_Events, BridgeManager.Manager_Events)
+        self.assertEqual(bridge.BUS_NAMESPACE, "bridge")
+        for name in ("Manager", "get_system", "registry"):
+            self.assertTrue(hasattr(bridge, name), name)
+
