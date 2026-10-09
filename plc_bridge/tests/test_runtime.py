@@ -410,6 +410,55 @@ def test_stop_waits_at_most_the_join_timeout_in_total(driver, monkeypatch):
         t.join(1)
 
 
+def test_stop_worst_case_is_the_join_timeout_plus_one_disconnect(driver, monkeypatch):
+    """What stop()'s docstring promises: JOIN_TIMEOUT_SEC, then one disconnect() of its own."""
+    import plc_bridge.runtime as rt
+    monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.2)
+    release = threading.Event()
+    driver.read = lambda symbols: (release.wait(5), ReadResult())[1]
+    plain_disconnect = driver.disconnect
+    calls = []
+
+    def slow_disconnect():
+        calls.append(threading.current_thread().name)
+        if len(calls) > 1:  # the first is the cleanup before connect
+            time.sleep(0.3)  # a close handshake the PLC never answers
+        plain_disconnect()
+
+    driver.disconnect = slow_disconnect
+    plc = PlcRuntime(driver, name="WC", enabled=True)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    time.sleep(0.1)  # the worker is now inside the driver
+    started = time.monotonic()
+    plc.stop()
+    elapsed = time.monotonic() - started
+    assert 0.45 <= elapsed < 0.8, elapsed
+    assert calls[-1] == threading.current_thread().name  # stop() disconnected from its own thread
+    release.set()
+
+
+def test_stop_never_closes_the_driver(driver):
+    closed = []
+    driver.close = lambda: closed.append(True)
+    plc = PlcRuntime(driver, name="NC", enabled=True)
+    plc.set_read_variables(["GVL.a"])
+    plc.start()
+    plc.stop()
+    plc.start()  # a stopped runtime can be started again, so the driver must still work
+    plc.stop()
+    assert closed == []
+
+
+def test_default_close_is_a_harmless_no_op():
+    d = FakeDriver()
+    d.connect()
+    d.close()
+    d.close()
+    assert d.disconnects == 0  # close() adds nothing to what stop() already did
+    assert PlcDriver.close is not None and not getattr(PlcDriver.close, "__isabstractmethod__", False)
+
+
 def test_restart_while_a_worker_is_stuck_leaves_no_zombie(driver, monkeypatch):
     import plc_bridge.runtime as rt
     monkeypatch.setattr(rt, "JOIN_TIMEOUT_SEC", 0.2)

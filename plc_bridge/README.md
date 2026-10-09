@@ -27,6 +27,7 @@ handle = plc.queue_write("GVL.Command.Blend", 1.0)
 handle.wait(1.0); print(handle.ok)
 ...
 plc.stop()
+plc.driver.close()   # once you are done with the driver for good
 ```
 
 ## What a consumer gets
@@ -73,10 +74,16 @@ B&R bridges each carried a copy of.
 
 One worker thread per PLC. Every period it flushes the queued writes and then
 reads, in that order, so the sample that follows a write reflects it; a queued
-write wakes the loop so it goes out at once. The thread is a daemon, and
-`stop()` returns within two seconds even when a driver call is stuck; a worker
-that outlives that exits on its own when the call returns, and a later
-`start()` is not confused by it.
+write wakes the loop so it goes out at once. The thread is a daemon.
+
+`stop()` waits at most two seconds (`JOIN_TIMEOUT_SEC`) for the worker, then
+calls `driver.disconnect()`, which closes the link and unblocks a stuck call.
+Its worst case is therefore two seconds plus the driver's disconnect bound:
+milliseconds for the ADS driver, up to the driver's `timeout` + 1 s (4 s by
+default) for the B&R driver when the PLC stopped answering. A host that must
+not block that long (a UI thread) calls `stop()` from a thread of its own; the
+Omniverse framework extension does. A worker that outlives the join exits on
+its own when the call returns, and a later `start()` is not confused by it.
 
 `scan()`, `scan_write()` and `scan_read()` run one iteration without a thread,
 for tests and for hosts that bring their own scheduling.

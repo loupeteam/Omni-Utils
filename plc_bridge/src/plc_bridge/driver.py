@@ -63,6 +63,12 @@ class PlcDriver(ABC):
       the dict returned by `write`. A failure of the connection or the whole
       request raises; the runtime reports it, asks `is_connected()`, and either
       keeps polling or reconnects.
+    * **Closed once, by the host.** `disconnect` leaves the driver reusable
+      (the runtime reconnects through it). `close` releases what the driver
+      holds for its whole life, such as the event-loop thread of an async
+      transport. The runtime never calls it: a PlcRuntime can be started again
+      after stop(). Whoever created the driver calls `close()` once it is done
+      with it, after the runtime's stop().
     """
 
     #: Characters that separate the parts of a symbol name for this vendor.
@@ -82,6 +88,15 @@ class PlcDriver(ABC):
         while a `connect` is in progress on the worker (a worker the runtime
         gave up on may still be inside `connect` when stop() closes the link);
         never raises.
+        """
+
+    def close(self) -> None:
+        """
+        Release everything the driver holds; it is not used again afterwards.
+        Called by the host that created the driver, after PlcRuntime.stop()
+        (which has already disconnected). Safe to call more than once, bounded
+        like `disconnect`, never raises. The default does nothing, which is
+        right for a driver without threads or event loops of its own.
         """
 
     @abstractmethod
