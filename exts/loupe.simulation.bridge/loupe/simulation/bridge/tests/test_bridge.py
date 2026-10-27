@@ -24,7 +24,7 @@ from plc_bridge import PlcDriver, ReadResult
 from .. import registry
 from ..bus import (
     BUS_NAMESPACE, EVENT_TYPE_CONNECTION, EVENT_TYPE_DATA_INIT, EVENT_TYPE_DATA_READ, EVENT_TYPE_ENABLE,
-    EVENT_TYPE_STATUS, EVENT_TYPE_WRITE, Manager, get_stream_name)
+    EVENT_TYPE_STATUS, EVENT_TYPE_WRITE, Manager, bus_payload, get_stream_name)
 from ..BridgeManager import Manager_Events
 from ..delivery import get_system
 from ..registry import Option
@@ -417,6 +417,31 @@ class TestBus(BridgeTestCase):
         manager.write_variables({"GVL.a": 2.0, "GVL.b": 3.0})
         self.assertTrue(await until(lambda: rt.driver.writes))
         self.assertEqual(rt.driver.writes[-1], {"GVL.a": 2.0, "GVL.b": 3.0})
+        manager.cleanup()
+
+    async def test_bus_payload_sends_sparse_arrays_as_index_dicts(self):
+        dense = {"GVL": {"Axes": [{"p": 1.0}, {"p": 2.0}], "b": True}}
+        self.assertIs(bus_payload(dense), dense)
+        sample = {"GVL": {"Axes": [None, None, {"p": 3.0, "q": [1, None, 3]}, {"p": 4.0}], "b": True},
+                  "M": [[None, 5]]}
+        self.assertEqual(bus_payload(sample), {
+            "GVL": {"Axes": {"2": {"p": 3.0, "q": {"0": 1, "2": 3}}, "3": {"p": 4.0}}, "b": True},
+            "M": [{"1": 5}]})
+        # the sample itself is left alone: on_sample listeners share it
+        self.assertEqual(sample["GVL"]["Axes"][:2], [None, None])
+
+    async def test_sparse_array_arrives_on_the_bus_as_index_dict(self):
+        got = []
+        manager = Manager("B4")
+        manager.register_data_callback(lambda e: got.append(e.payload["data"]))
+        self.define("/PLC/B4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.arr", "GVL.a"], "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        self.assertTrue(await until(lambda: got))
+        self.assertEqual(got[0]["GVL"]["arr"], {"0": 10.0, "2": 12.0})
+        self.assertEqual(got[0]["GVL"]["a"], 1.0)
+        # on_sample still gets the list
+        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], [10.0, None, 12.0])
         manager.cleanup()
 
     async def test_legacy_names_off_by_setting(self):

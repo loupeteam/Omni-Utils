@@ -26,6 +26,12 @@ Bus payloads (`event.payload`):
 | DATA_READ_REQ   | request in: `{"variables": [names]}`                        |
 | DATA_WRITE_REQ  | request in: `{"variables": [{"name", "value"}]}`             |
 
+A sparse array (a PLC that reads `Axes[2]` but not `Axes[0]`) is `None`-padded
+in the nested sample. carb cannot hold `None` in a sequence, so DATA_READ sends
+such a list as a dict keyed by index strings, `{"2": {...}}`: what carb itself
+made of it in 0.2.x, without its warning per element per push (see
+`bus_payload`). Dense arrays stay lists.
+
 The pushes happen on the runtime's worker thread, as they did in 0.2.x; a
 subscriber that touches the stage or the UI marshals to the main thread
 itself, or uses `on_sample_main` instead.
@@ -65,6 +71,33 @@ def get_stream_name(msg_type: str, name: str) -> int:
 def legacy_bus_names_enabled() -> bool:
     value = carb.settings.get_settings().get(SETTING_LEGACY_BUS_NAMES)
     return True if value is None else bool(value)
+
+
+def bus_payload(value):
+    """
+    `value` with every list that holds a `None` replaced by a dict of its
+    other elements keyed by index string; anything else is returned as is.
+
+    carb converts such a list to that same dict on its own, but logs
+    "Unknown type in sequence being written to item" for every `None` on
+    every push; at 50 Hz that is hundreds of log lines a second, and Kit's
+    log keeps them, so the process grows while data flows.
+    """
+    if isinstance(value, dict):
+        out = None
+        for key, item in value.items():
+            converted = bus_payload(item)
+            if converted is not item:
+                if out is None:
+                    out = dict(value)
+                out[key] = converted
+        return value if out is None else out
+    if isinstance(value, list):
+        if any(item is None for item in value):
+            return {str(index): bus_payload(item) for index, item in enumerate(value) if item is not None}
+        converted = [bus_payload(item) for item in value]
+        return value if all(a is b for a, b in zip(converted, value)) else converted
+    return value
 
 
 class BusAdapter:
@@ -122,6 +155,7 @@ class BusAdapter:
             logger.error("%s: error pushing %s: %s", self._name, event_type, e)
 
     def _on_data(self, data):
+        data = bus_payload(data)
         for events in self._events:
             self._push(events.EVENT_TYPE_DATA_READ, {"data": data})
 
