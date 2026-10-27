@@ -35,6 +35,7 @@ from omni.usd import StageEventType
 from .delivery import _set_system
 from .System import System
 from .SystemUI import SystemUI
+from .versions import check_extension_requirements
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ MENU_ITEM_NAME = "PLC Bridge"
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id: str):
         self._ext_id = ext_id
+        # pipapi only checks that plc_bridge imports; say so loudly when the
+        # one it found is not the pinned version (a stale pip folder).
+        check_extension_requirements(ext_id)
         self._system = System()
         self._system.install_default_components()
         _set_system(self._system)

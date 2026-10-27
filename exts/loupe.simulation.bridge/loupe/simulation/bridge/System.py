@@ -22,12 +22,16 @@ import omni.usd
 from . import registry
 from .delivery import MainThreadDelivery
 from .registry import DriverSpec
-from .Runtime import Runtime
+from .Runtime import Runtime, wait_for_closers
 from .schema import DEFAULT_ROOT, PlcConfig, author_config, classify, component_name, discover, read_config
 
 logger = logging.getLogger(__name__)
 
 SETTING_AUTO_CONNECT = "/exts/loupe.simulation.bridge/autoConnect"
+# How long dispose() (the extension's shutdown) waits for the background
+# closes in total: long enough for healthy PLCs to close their connections,
+# short enough that one that stopped answering does not hold up Kit's exit.
+DISPOSE_WAIT_SEC = 2.0
 
 
 class Component:
@@ -49,7 +53,9 @@ class Component:
             except Exception:
                 logger.exception("%s: %s component cleanup failed", self.runtime.name, kind)
         self.parts.clear()
-        self.runtime.cleanup()
+        # Off the calling thread (usually the main thread, on a stage event):
+        # stopping a PLC that stopped answering takes seconds.
+        self.runtime.cleanup(wait=False)
 
 
 class System:
@@ -94,13 +100,20 @@ class System:
     def dispose(self):
         """Release everything, including the delivery and the registry listener. The extension's shutdown."""
         self.cleanup()
+        if not wait_for_closers(DISPOSE_WAIT_SEC):
+            logger.warning("a PLC connection was still closing after %.0fs; left to its daemon thread",
+                           DISPOSE_WAIT_SEC)
         if self._registry_remove is not None:
             self._registry_remove()
             self._registry_remove = None
         self.delivery.cleanup()
 
     def cleanup(self):
-        """Remove every component. The stage is about to change or go away."""
+        """
+        Remove every component. The stage is about to change or go away.
+        Returns at once: each PLC is stopped and its driver closed on a thread
+        of its own (Runtime.cleanup(wait=False)).
+        """
         for name, component in list(self._components.items()):
             self.delivery.detach(name)
             component.cleanup()
