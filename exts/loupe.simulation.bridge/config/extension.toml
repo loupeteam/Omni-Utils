@@ -3,7 +3,7 @@ reloadable = true
 order = 0
 
 [package]
-version = "0.3.0-rc1"
+version = "0.3.0"
 category = "simulation"
 title = "PLC Bridge"
 description = "Vendor-neutral PLC bridge for Omniverse: /PLC prims, a driver registry, main-thread delivery, the message bus and the USD mirror. Vendor extensions register a driver."
@@ -38,7 +38,7 @@ icon = "data/icon.png"
 # pin: Kit installs every extension's pip requirements into one site-packages
 # and does not resolve conflicts, so vendor extensions pin only their own
 # library and take plc-bridge from here.
-requirements = ["plc-bridge==0.3.0rc1"]
+requirements = ["plc-bridge==0.3.0"]
 # What pipapi imports to decide whether the requirement is already satisfied;
 # it calls pip only when this import fails, so an editable install into Kit's
 # Python (tools/dev_link.py) takes precedence over the bundled wheel. A

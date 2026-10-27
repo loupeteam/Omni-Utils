@@ -1,17 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-- Replacing the stage while a mirrored PLC was delivering data could crash
-  Kit: the mirror wrote a sample into the outgoing stage. The mirror now
-  writes and reacts to edits only while its stage is the context's open stage.
-- `Manager("")` raised before its subscription list existed, so `__del__`
-  printed an `AttributeError` that `omni.kit.test` counts as a failure.
-- The legacy-prim deprecation warning said "0.2.x" for every vendor; it now
-  says "legacy", which is also right for B&R's 0.1.x prims.
-
-## [0.3.0-rc1] - 2026-10-07
+## [0.3.0] - Unreleased
 
 First release of the framework extension. Until now the files in this folder
 were vendored into each vendor extension as a git submodule
@@ -42,6 +31,15 @@ vendor code behind a driver registry.
   the framework builds a field per option of the schema.
 - Kit tests (`omni.kit.test`) and the headless harness `tools/kit_check`
   with a mixed stage (a legacy Beckhoff prim and a neutral B&R prim).
+- `PlcDriver.close()` in the `plc-bridge` contract (no-op by default): the
+  framework calls it after stopping a runtime, since it created the driver.
+- Startup version check: the framework compares the installed `plc-bridge`
+  with its pin and logs an error naming the stale pip folder on a mismatch
+  (Kit's pip installer checks imports, never versions);
+  `check_extension_requirements(ext_id)` does the same for vendor extensions.
+- The package re-exports `get_stream_name`, `legacy_bus_names_enabled` and
+  `Manager_Events` for the vendor extensions' deprecated modules; the
+  submodule paths keep working.
 
 ### Changed
 - The USD mirror is a registered component, created when `bridge:MirrorToUsd`
@@ -51,14 +49,26 @@ vendor code behind a driver registry.
   `TestProg:lreal` keeps its colon (0.2.x re-derived `TestProg.lreal`). Arrays
   read whole and `None`-padded arrays mirror as `_<index>` prims.
 - `bridge:MirrorSymbols` narrows the mirror to a watch list.
+- A sparse array (`Axes[2]` read, `Axes[0]` not) goes out on the bus as a
+  dict keyed by index strings, `{"2": {...}}`. That is what carb already made
+  of the `None`-padded list in 0.2.x, but carb logged a warning per missing
+  element per push, and Kit kept those log lines: the process grew about 1 MB
+  a minute while data flowed. `on_sample`, `on_sample_main` and `latest()`
+  still get the padded list.
+- The mirror writes, and reacts to edits, only while its stage is the
+  context's open stage, so replacing the stage while a PLC is delivering data
+  no longer writes into the outgoing stage.
 - `plc-bridge` is a pip requirement pinned exactly by this extension; the
   wheel ships in `wheels/` until the package is on PyPI.
+- Closing or replacing the stage no longer waits on the PLCs: each runtime is
+  stopped and its driver closed on a thread of its own. Before, a B&R PLC
+  that stopped answering held the main thread for 5 s per PLC.
 
 ### Compatibility
 - Do not enable a 0.2.x vendor extension next to this one: both own the same
   legacy prims (two runtimes and two ADS connections per PLC, every bus event
-  twice, two mirrors, a `write:value` edit written twice). Phase 4 ships thin
-  vendor extensions that depend on this one.
+  twice, two mirrors, a `write:value` edit written twice). The 0.3.0 vendor
+  extensions are thin drivers that depend on this one.
 - `get_system().get_component(name)` keeps `enable_communication`,
   `refresh_rate` / `refresh_period_ms`, `read_variables`,
   `set_read_variables`, `queue_write`, `is_connected`, `plc`, `driver`,
@@ -76,5 +86,6 @@ vendor code behind a driver registry.
 - `Manager()` with no name (deprecated in 0.2.0).
 - `RuntimeUsd` reading from the bus, `flatten_obj`, `get_options_from_prim`,
   `set_options_on_prim`.
-- `RuntimeBase.py` is not part of this extension; it stays at the repo root
-  for the vendor submodules until Phase 4 removes them.
+- `RuntimeBase.py` is not part of this extension. It stays at the repo root
+  for 0.2.x vendor extensions that still vendor this repo as a submodule;
+  the 0.3.0 vendor extensions no longer do.

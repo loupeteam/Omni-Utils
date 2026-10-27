@@ -25,7 +25,7 @@ Copied from the Beckhoff repo's `tools/kit_check` (Phase 1 of its
 You need a kit-app-template build (the folder holding `kit/kit.exe`, usually
 `_build/windows-x86_64/release`) whose `extscache` has USD Composer's
 extensions, and the vendor driver libraries in Kit's Python, since the check
-registers them itself until Phase 4 moves that into the vendor extensions:
+registers them itself rather than loading the vendor extensions:
 
 ```
 python tools/dev_link.py <kit build root> --driver <Beckhoff repo>/beckhoff_bridge --driver <B&R repo>/br_bridge

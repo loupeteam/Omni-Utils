@@ -24,7 +24,7 @@ from plc_bridge import PlcDriver, ReadResult
 from .. import registry
 from ..bus import (
     BUS_NAMESPACE, EVENT_TYPE_CONNECTION, EVENT_TYPE_DATA_INIT, EVENT_TYPE_DATA_READ, EVENT_TYPE_ENABLE,
-    EVENT_TYPE_STATUS, EVENT_TYPE_WRITE, Manager, get_stream_name)
+    EVENT_TYPE_STATUS, EVENT_TYPE_WRITE, Manager, bus_payload, get_stream_name)
 from ..BridgeManager import Manager_Events
 from ..delivery import get_system
 from ..registry import Option
@@ -79,6 +79,36 @@ class FakeDriver(PlcDriver):
 
 class ColonDriver(FakeDriver):
     symbol_separators = ":."
+
+
+class SilentDriver(FakeDriver):
+    """
+    Like a PLC that stopped answering once `hang` is set: a read blocks until
+    released and a disconnect waits out a close handshake that never comes.
+    Records close().
+    """
+
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hang = threading.Event()
+        self.release = threading.Event()
+        self.closed = threading.Event()
+        SilentDriver.instances.append(self)
+
+    def read(self, symbols):
+        if self.hang.is_set():
+            self.release.wait(10)
+        return super().read(symbols)
+
+    def disconnect(self):
+        if self.hang.is_set():
+            time.sleep(1.5)
+        super().disconnect()
+
+    def close(self):
+        self.closed.set()
 
 
 OPTIONS = [
@@ -419,6 +449,31 @@ class TestBus(BridgeTestCase):
         self.assertEqual(rt.driver.writes[-1], {"GVL.a": 2.0, "GVL.b": 3.0})
         manager.cleanup()
 
+    async def test_bus_payload_sends_sparse_arrays_as_index_dicts(self):
+        dense = {"GVL": {"Axes": [{"p": 1.0}, {"p": 2.0}], "b": True}}
+        self.assertIs(bus_payload(dense), dense)
+        sample = {"GVL": {"Axes": [None, None, {"p": 3.0, "q": [1, None, 3]}, {"p": 4.0}], "b": True},
+                  "M": [[None, 5]]}
+        self.assertEqual(bus_payload(sample), {
+            "GVL": {"Axes": {"2": {"p": 3.0, "q": {"0": 1, "2": 3}}, "3": {"p": 4.0}}, "b": True},
+            "M": [{"1": 5}]})
+        # the sample itself is left alone: on_sample listeners share it
+        self.assertEqual(sample["GVL"]["Axes"][:2], [None, None])
+
+    async def test_sparse_array_arrives_on_the_bus_as_index_dict(self):
+        got = []
+        manager = Manager("B4")
+        manager.register_data_callback(lambda e: got.append(e.payload["data"]))
+        self.define("/PLC/B4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+                                ATTR_VARIABLES: ["GVL.arr", "GVL.a"], "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        self.assertTrue(await until(lambda: got))
+        self.assertEqual(got[0]["GVL"]["arr"], {"0": 10.0, "2": 12.0})
+        self.assertEqual(got[0]["GVL"]["a"], 1.0)
+        # on_sample still gets the list
+        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], [10.0, None, 12.0])
+        manager.cleanup()
+
     async def test_legacy_names_off_by_setting(self):
         self.settings.set(SETTING_LEGACY_BUS, False)
         self.define("/PLC/B2", {ATTR_DRIVER: "fake", "bridge:MirrorToUsd": False})
@@ -722,6 +777,52 @@ class TestRobustness(BridgeTestCase):
         self.assertIs(type(rt.driver), FakeDriverV2)
         self.assertIsNotNone(self.system.get_part("RR1", "bus"))
 
+    async def test_cleanup_closes_the_driver(self):
+        from ..Runtime import wait_for_closers
+        registry.register("silent", SilentDriver, OPTIONS)
+        SilentDriver.instances.clear()
+        self.define("/PLC/C1", {ATTR_DRIVER: "silent", ATTR_ENABLE: True, ATTR_VARIABLES: ["GVL.a"],
+                                "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        rt = self.system.get_component("C1")
+        self.assertTrue(await until(lambda: rt.plc.latest() is not None))
+        self.system.remove_component("C1")
+        self.assertTrue(wait_for_closers(3))
+        driver = SilentDriver.instances[-1]
+        self.assertTrue(driver.closed.is_set(), "the framework created the driver, so it must close it")
+        self.assertFalse(rt.plc.is_running)
+        rt.cleanup()  # a second cleanup does nothing
+        rt.cleanup(wait=False)
+
+    async def test_stage_change_does_not_wait_for_a_silent_plc(self):
+        from ..Runtime import wait_for_closers
+        registry.register("silent", SilentDriver, OPTIONS)
+        SilentDriver.instances.clear()
+        for name in ("S1", "S2"):
+            self.define(f"/PLC/{name}", {ATTR_DRIVER: "silent", ATTR_ENABLE: True, ATTR_VARIABLES: ["GVL.a"],
+                                         "bridge:RefreshRate": 5, "bridge:MirrorToUsd": False})
+        self.system.find_and_create_components()
+        runtimes = [self.system.get_component(n) for n in ("S1", "S2")]
+        self.assertTrue(await until(lambda: all(rt.plc.latest() is not None for rt in runtimes)))
+        for driver in SilentDriver.instances:
+            driver.hang.set()
+        await ticks(3)  # the workers are now stuck in a read
+        started = time.monotonic()
+        self.system.cleanup()
+        elapsed = time.monotonic() - started
+        try:
+            # Synchronously this was JOIN_TIMEOUT_SEC + 1.5 s per PLC.
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(self.system.get_component_names(), [])
+            names = [t.name for t in threading.enumerate()]
+            self.assertIn("S1-close", names)
+            self.assertTrue(wait_for_closers(10), "the background closes did not finish")
+            self.assertTrue(all(d.closed.is_set() for d in SilentDriver.instances))
+            self.assertFalse(any(rt.plc.is_running for rt in runtimes))
+        finally:
+            for driver in SilentDriver.instances:
+                driver.release.set()
+
     async def test_stage_open_and_close_follow_the_extension(self):
         if self.own_system:
             self.skipTest("the extension is not running; stage events are its job")
@@ -843,3 +944,80 @@ class TestWindowAndEdits(BridgeTestCase):
         prim.GetAttribute("write:value").Set(4.0)
         self.assertTrue(await until(lambda: rt.driver.writes))
         self.assertEqual(rt.driver.writes[-1], {"GVL.a": 4.0})
+
+
+class TestPackageSurface(omni.kit.test.AsyncTestCase):
+    async def test_names_the_vendor_modules_use_are_exported(self):
+        import loupe.simulation.bridge as bridge
+        from .. import bus, BridgeManager
+        self.assertIs(bridge.get_stream_name, bus.get_stream_name)
+        self.assertIs(bridge.legacy_bus_names_enabled, bus.legacy_bus_names_enabled)
+        self.assertIs(bridge.Manager_Events, BridgeManager.Manager_Events)
+        self.assertEqual(bridge.BUS_NAMESPACE, "bridge")
+        for name in ("Manager", "get_system", "registry", "check_extension_requirements"):
+            self.assertTrue(hasattr(bridge, name), name)
+
+
+class TestVersionCheck(omni.kit.test.AsyncTestCase):
+    """The startup check against a faked installed version (pipapi never compares versions)."""
+
+    async def setUp(self):
+        from .. import versions
+        self.versions = versions
+        self._saved = (versions._installed_version, versions._installed_location)
+
+    async def tearDown(self):
+        self.versions._installed_version, self.versions._installed_location = self._saved
+
+    def _fake(self, installed, location):
+        self.versions._installed_version = lambda dist: installed[dist]
+        self.versions._installed_location = lambda dist: location
+
+    async def test_the_framework_pin_matches_what_is_installed(self):
+        import omni.kit.app
+        manager = omni.kit.app.get_app().get_extension_manager()
+        ext_id = manager.get_enabled_extension_id("loupe.simulation.bridge")
+        requirements = self.versions.extension_requirements(ext_id)
+        self.assertTrue(any(r.startswith("plc-bridge==") for r in requirements), requirements)
+        logged = []
+        self.assertEqual(self.versions.check_extension_requirements(ext_id, log=logged.append), [])
+        self.assertEqual(logged, [])
+
+    async def test_a_stale_package_is_reported_with_the_folder_to_clear(self):
+        import omni.kit.app
+        manager = omni.kit.app.get_app().get_extension_manager()
+        ext_id = manager.get_enabled_extension_id("loupe.simulation.bridge")
+        env = os.path.join("C:\\", "Users", "u", "AppData", "Local", "ov", "data", "Kit", "app", "1.0",
+                           "pip3-envs", "default-3.12")
+        self._fake({"plc-bridge": "0.3.0rc1"}, env)
+        logged = []
+        problems = self.versions.check_extension_requirements(ext_id, log=logged.append)
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(logged, problems)
+        self.assertIn("plc-bridge 0.3.0rc1", problems[0])
+        self.assertIn("loupe.simulation.bridge needs plc-bridge==", problems[0])
+        self.assertIn("delete the folder " + env, problems[0])
+
+    async def test_ranges_and_unpinned_requirements(self):
+        self._fake({"beckhoff-bridge": "0.3.1", "br-bridge": "0.4.0", "pyads": "3.6.0"}, None)
+        logged = []
+        problems = self.versions.check_requirements(
+            ["pyads", "beckhoff-bridge>=0.3.0,<0.4", "br-bridge>=0.3.0,<0.4"], "vendor", log=logged.append)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("br-bridge 0.4.0", problems[0])
+        self.assertIn("pip uninstall br-bridge", problems[0])
+
+    async def test_version_ordering(self):
+        satisfies = self.versions.satisfies
+        self.assertFalse(satisfies("0.3.0rc1", "==0.3.0"))
+        self.assertFalse(satisfies("0.3.0rc1", ">=0.3.0,<0.4"))
+        self.assertTrue(satisfies("0.3.0", "==0.3"))
+        self.assertTrue(satisfies("0.3.9", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.4.0", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.4.0rc1", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.4.0.dev1", "<0.4"))
+        self.assertTrue(satisfies("0.4.0rc1", "<0.4.0rc2"))
+        self.assertTrue(satisfies("0.3.9rc1", "<0.4"))
+        self.assertTrue(satisfies("0.3.0.post1", ">0.3.0"))
+        self.assertFalse(satisfies("0.4.0", "~=0.3.0"))
+        self.assertTrue(satisfies("0.3.4", "~=0.3.0"))
