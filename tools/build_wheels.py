@@ -1,6 +1,6 @@
 """Build the plc-bridge wheel the framework extension bundles until it is on PyPI.
 
-loupe.simulation.bridge lists `plc-bridge==<version>` as a pip requirement and
+loupe.simulation.bridge lists `plc-bridge>=<version>,<<next minor>` as a pip requirement and
 points pipapi's `archiveDirs` at `exts/loupe.simulation.bridge/wheels/`. This
 script fills that folder from `plc_bridge/` at the repo root. plc_bridge has
 no dependencies, so the wheel alone is the whole closure pipapi needs

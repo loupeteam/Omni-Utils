@@ -144,7 +144,7 @@ def check_requirements(requirements: Iterable[str], owner: str,
 
     Args:
         requirements: pip requirement strings, as in `[python.pipapi]
-            requirements` ("plc-bridge==0.3.0", "pyads"). Those without a
+            requirements` ("plc-bridge>=0.3.0,<0.4", "pyads"). Those without a
             version clause are skipped.
         owner: who asked for them (the extension name), for the message.
         log: where each problem goes; default logger.error.
