@@ -16,13 +16,49 @@ extension. Pick by what thread you are on and whether you need every sample.
 sample.seq        # counts up by one per read for the life of the runtime
 sample.t          # time.monotonic() when the read returned
 sample.values     # flat: {"GVL.Axes[0].ActualPosition": 12.5, ...}, as the PLC named them
-sample.errors     # flat: symbols the PLC rejected in that read, with the reason
-sample.nested     # the values as dicts and lists: sample.nested["GVL"]["Axes"][0]["ActualPosition"]
+sample.errors     # flat: symbol -> SymbolError for the symbols the PLC failed in that read
+sample.missing    # the symbols the PLC does not know (error code "missing"), sorted
+sample.nested     # nested: sample.nested["GVL"]["Axes"][0]["ActualPosition"]
 ```
 
 `values` is the canonical shape; `nested` is built on first use. A symbol is
 in `values` or in `errors`, never both, and an error is never delivered as a
 value.
+
+A Sample is **read-only**, because the same object goes to every listener and
+to `latest()`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `values`, `errors` | `types.MappingProxyType` | indexing, `in`, `.items()` and `==` with a dict work; assignment raises `TypeError`. A value the driver returned whole (an array as a list) is not copied. |
+| `nested` | `MappingProxyType` all the way down, arrays as **tuples** | `nested["GVL"]["Axes"][0]` works; a sparse array keeps `None` where nothing was read. A tuple does not compare equal to a list, and `isinstance(x, dict)` is false: test for `collections.abc.Mapping`. |
+
+For a copy you can change, use `dict(sample.values)` or
+`plc_bridge.thaw(sample.nested)` (plain dicts and lists). The message bus
+already sends such a copy.
+
+### Symbol errors
+
+Each entry in `Sample.errors`, `WriteResult.errors` and a failed write's
+`WriteHandle.error` is a `plc_bridge.SymbolError`: a `str` holding the
+vendor's text, plus `.code`:
+
+| Code | Meaning | Beckhoff (ADS) | B&R (OMJSON) |
+|---|---|---|---|
+| `missing` | the PLC does not know the symbol | ADS error 1808 (symbol not found) | `undefined`, not in the response, or a write to a symbol last read as missing |
+| `rejected` | the PLC knows the symbol but refused the value | any other per-symbol ADS error on a write | a write the PLC answered with an error |
+| `other` | anything else reported for one symbol | any other per-symbol ADS error on a read | any other per-symbol read error |
+
+```python
+from plc_bridge import ERROR_MISSING
+
+for name, error in sample.errors.items():
+    if error.code == ERROR_MISSING:
+        ...                     # sample.missing lists exactly these
+```
+
+Because a SymbolError is a `str`, code that printed or compared the text keeps
+working; new code reads `.code`.
 
 ## on_sample_main
 
@@ -66,8 +102,9 @@ A listener that raises is logged and does not disturb the polling. To get the
 data onto the main thread yourself, store it and read it from an
 `omni.kit.app` update subscription, which is what `on_sample_main` does.
 
-Branch on `Problem.kind` (`connect`, `read`, `write`, `ok`) and
-`Problem.symbols`, never on `Problem.text`: the text carries the driver's own
+Branch on `Problem.kind` (`connect`, `read`, `write`, `ok`), `Problem.symbols`
+and the error codes in `Sample.errors` / `WriteResult.errors` (`missing`,
+`rejected`, `other`), never on `Problem.text` or the error text: it carries the driver's own
 wording ("symbol not found" from ADS, "undefined" from OMJSON, exception
 messages that change between library versions), so the same failure reads
 differently on another vendor. The text is for people.
@@ -85,7 +122,15 @@ handle.wait(1.0); handle.ok; handle.error            # optional
 
 Writes go out on the next scan, before that scan's read, so the following
 sample reflects them. A later write of the same symbol replaces a pending one
-(its handle resolves with `"superseded"`). `plc.on_write(cb)` reports every
+(its handle resolves with `"superseded"`).
+
+Writes are never held for a later connection. A write queued while the PLC is
+not connected, or while it is disabled, resolves at once with
+`handle.error == "not connected"` (`plc_bridge.WRITE_NOT_CONNECTED`), and
+nothing is sent. A write still pending when the connection drops or the PLC is
+disabled resolves the same way; one pending at `stop()` resolves with
+`"stopped"`. A write the PLC failed carries a SymbolError with code `missing`
+or `rejected`. `plc.on_write(cb)` reports every
 flushed batch as a `WriteResult`. Spell the symbol as the PLC knows it
 (`TestProg:lreal` on B&R).
 
@@ -113,6 +158,19 @@ The pushes happen on the worker thread, so a bus subscriber runs there too
 `Problem` (`{"kind", "text", "symbols"}`) on the neutral name and the text on
 a vendor name. As with `on_problem`, branch on `kind` and `symbols`; the text
 differs between vendors.
+
+## The System
+
+`get_system()` returns the framework's System. Its public API is three
+methods; everything else on it is internal and may change in any release.
+
+| Method | What it does |
+|---|---|
+| `get_component(name)` | the Runtime adapter of one PLC (`.plc` is the `PlcRuntime`), or None |
+| `get_component_names()` | the names of the PLCs that have a Runtime |
+| `add_component(name, options, author_prim=True, driver=None)` | create a PLC from code; `options` is a dict of prim attribute names (`bridge:enable`, `bridge:periodMs`, `bridge:variables`, `beckhoff:amsNetId`, ...); `author_prim=False` keeps it off the stage |
+
+For data, prefer `get_plc(name)` and `on_sample_main(name, cb)`.
 
 ## Thread rules, summarised
 

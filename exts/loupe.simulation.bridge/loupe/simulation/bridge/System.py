@@ -62,6 +62,19 @@ class System:
     """
     Manages the PLC components of the open stage.
 
+    Public API (stable through 0.x, what `get_system()` callers may use):
+
+    * `get_component(name)` -> the Runtime of one PLC, or None;
+    * `get_component_names()` -> the names of the PLCs in the stage;
+    * `add_component(name, options, author_prim=True, driver=None)` -> create
+      a PLC from code (vendor shims pass `author_prim=False` for a PLC that
+      should not be written to the stage).
+
+    Everything else on this class (discovery, component factories, option
+    reads and writes to the stage, the delivery, `dispose`/`cleanup`) is
+    internal: the extension and its UI use it, and it may change in any
+    release without a deprecation period.
+
     Args:
         system_root: the prim path prefix a component name is relative to.
         auto_connect: None reads the setting /exts/loupe.simulation.bridge/autoConnect
@@ -194,10 +207,12 @@ class System:
     # region - Components
 
     def get_component(self, name: str) -> Optional[Runtime]:
+        """Public. The Runtime of the PLC called `name` (the prim path below the root), or None."""
         component = self._components.get(name)
         return None if component is None else component.runtime
 
     def get_component_names(self) -> list:
+        """Public. The names of the PLCs that currently have a Runtime, in creation order."""
         return list(self._components)
 
     def get_config(self, name: str) -> Optional[PlcConfig]:
@@ -206,13 +221,14 @@ class System:
 
     def add_component(self, name: str, options=None, author_prim: bool = True, driver: Optional[str] = None) -> Runtime:
         """
-        Create the Runtime (and the registered components) for one PLC.
+        Public. Create the Runtime (and the registered components) for one
+        PLC. Returns the existing Runtime when `name` already has one.
 
         Args:
             name: the component name; the prim is `<system_root><name>` unless
                 the name is already a path.
             options: a PlcConfig, or a dict of prim attribute names to values
-                (`bridge:driver`, `bridge:Enable`, `beckhoff:AmsNetId`, ...).
+                (`bridge:driver`, `bridge:enable`, `beckhoff:amsNetId`, ...).
             author_prim: define the prim and write the options onto it. False
                 for a prim that already exists and was just read.
             driver: the driver name when `options` does not carry one; default
@@ -322,9 +338,9 @@ class System:
                 for prefix in (spec.namespace + ":", legacy):
                     if prefix and key.startswith(prefix):
                         bare = key[len(prefix):]
-                option = spec.option(bare)
+                option = spec.option(bare) or spec.option_by_legacy_key(bare)
                 if option is not None:
-                    config.options[bare] = option.coerce(value)
+                    config.options[option.key] = option.coerce(value)
 
     def create_component_prim(self, name: str, config: PlcConfig, spec: Optional[DriverSpec] = None) -> str:
         """Define the PLC prim and write the config onto it in the neutral form. Returns the prim path."""
@@ -400,7 +416,7 @@ def bus_component(system: System, runtime: Runtime, config: PlcConfig):
 
 
 def mirror_component(system: System, runtime: Runtime, config: PlcConfig):
-    """The USD mirror, for PLCs whose prim has bridge:MirrorToUsd true (the default)."""
+    """The USD mirror, for PLCs whose prim has bridge:mirrorToUsd true (the default)."""
     if not runtime.mirror:
         return None
     from .UsdManager import RuntimeUsd
