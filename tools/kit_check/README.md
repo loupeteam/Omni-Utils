@@ -60,7 +60,7 @@ Live mode expects the Beckhoff PLC program behind the stage's symbols
 local TwinCAT runtime. The B&R side runs against a mock OMJSON server the
 check starts in-process from `br_bridge/tests/mock_omjson.py` (found next to
 the installed `br_bridge` checkout, or at `FIXCHECK_BR_TESTS`); the prim's
-`br:Port` is overridden with the mock's port through the options setter.
+`br:port` is overridden with the mock's port through the options setter.
 
 ## Kit tests
 

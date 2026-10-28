@@ -208,7 +208,7 @@ class SystemUI:
                     self._row("Mirror to USD", lambda: ui.Label(
                         ("on" if runtime.mirror else "off")
                         + (f", watching {', '.join(runtime.mirror_symbols)}" if runtime.mirror_symbols else "")
-                        + "  (bridge:MirrorToUsd / bridge:MirrorSymbols on the prim)"))
+                        + "  (bridge:mirrorToUsd / bridge:mirrorSymbols on the prim)"))
 
                     with ui.CollapsableFrame("Cyclic Read Variables", collapsed=True):
                         with ui.VStack(spacing=5, height=200):

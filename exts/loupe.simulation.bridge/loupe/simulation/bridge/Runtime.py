@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Why a runtime that the prim asked to enable is sitting disabled.
 HELD_BY_AUTO_CONNECT = (
-    "the prim has bridge:Enable = true, but the app setting "
+    "the prim has bridge:enable = true, but the app setting "
     "/exts/loupe.simulation.bridge/autoConnect is false; enable it here or in code"
 )
 
@@ -86,7 +86,7 @@ class Runtime:
     `refresh_rate` / `refresh_period_ms`, `read_variables`,
     `set_read_variables`, `queue_write`, `is_connected`, `plc`, `driver`,
     `name`. Narrower than 0.2.x: `options` returns the neutral keys with
-    `bridge:Variables` as a list, and the vendor properties (`ams_net_id`,
+    `bridge:variables` as a list, and the vendor properties (`ams_net_id`,
     `host`, `port`) are gone; use `driver_options` / `set_driver_option` or
     the driver object itself.
     """
@@ -219,7 +219,8 @@ class Runtime:
     def refresh_period_ms(self, value):
         self._plc.refresh_ms = value
 
-    # Two names for one value; the prim attribute is called RefreshRate.
+    # Two names for one value (the prim attribute is bridge:periodMs); kept
+    # because 0.2.x code assigns refresh_rate.
     refresh_rate = refresh_period_ms
 
     write_sleep_time = property(
@@ -276,8 +277,8 @@ class Runtime:
     def options(self) -> dict:
         """
         The configuration as a flat dict keyed by prim attribute name:
-        `bridge:Enable`, `bridge:RefreshRate`, `bridge:Variables` (a list),
-        `bridge:MirrorToUsd`, `bridge:MirrorSymbols` and `<namespace>:<key>`
+        `bridge:enable`, `bridge:periodMs`, `bridge:variables` (a list),
+        `bridge:mirrorToUsd`, `bridge:mirrorSymbols` and `<namespace>:<key>`
         for the driver's options. Secrets appear as their references.
         """
         options = {
@@ -294,10 +295,11 @@ class Runtime:
     @options.setter
     def options(self, value: dict):
         """
-        Apply a partial update. Keys may be neutral (`bridge:Enable`,
-        `beckhoff:AmsNetId`), 0.2.x (`beckhoff_bridge:Enable`,
+        Apply a partial update. Keys may be neutral (`bridge:enable`,
+        `beckhoff:amsNetId`), 0.2.x (`beckhoff_bridge:Enable`,
         `beckhoff_bridge:Variables` as a comma-separated string) or bare option
-        keys (`AmsNetId`). Missing keys leave their setting alone. `Enable`
+        keys (`amsNetId`, or the 0.2.x `AmsNetId`). Missing keys leave their
+        setting alone. `enable`
         is always re-assigned, as in 0.2.x: the assignment pushes the ENABLE
         event that tells listeners the options were (re)applied.
         """
@@ -340,14 +342,16 @@ class Runtime:
                     out[ATTR_ENABLE] = item
                 elif bare == "RefreshRate":
                     out[ATTR_REFRESH] = item
-                elif self._spec.option(bare) is not None:
-                    out["driver:" + bare] = item
+                elif self._spec.option_by_legacy_key(bare) is not None:
+                    out["driver:" + self._spec.option_by_legacy_key(bare).key] = item
                 else:
                     logger.warning("%s: unknown option %r ignored", self._name, key)
             elif key.startswith(neutral) and self._spec.option(key[len(neutral):]) is not None:
                 out["driver:" + key[len(neutral):]] = item
             elif self._spec.option(key) is not None:
                 out["driver:" + key] = item
+            elif self._spec.option_by_legacy_key(key) is not None:
+                out["driver:" + self._spec.option_by_legacy_key(key).key] = item
             else:
                 logger.warning("%s: unknown option %r ignored", self._name, key)
         return out
