@@ -34,13 +34,13 @@ plc.driver.close()   # once you are done with the driver for good
 
 | Call | What arrives |
 |---|---|
-| `on_sample(cb)` | a `Sample` per successful read: `seq` (counts up), `t` (monotonic), flat `values`, per-symbol `errors`, and `nested` (the values as dicts and lists, built on first use). |
+| `on_sample(cb)` | a `Sample` per successful read: `seq` (counts up), `t` (monotonic), flat `values`, per-symbol `errors` (each a `SymbolError`: the vendor text plus `.code` `missing` / `rejected` / `other`), `missing` (the symbols the PLC does not know), and `nested` (the values as nested data, built on first use). Read-only: `values` and `errors` are `MappingProxyType`, `nested` is read-only all the way down with arrays as tuples; `thaw(sample.nested)` gives plain dicts and lists. |
 | `on_data(cb)` | `Sample.nested` only; the 0.2.x shape. |
 | `latest()` | the newest `Sample`, from any thread, for consumers that pull once per tick instead of taking every packet. Compare `seq` to see whether it is new. |
 | `on_problem(cb)` | a `Problem` (`kind`, `text`, `symbols`) when a problem starts, every 2 s while it persists, and once (`kind == "ok"`) when a read problem clears. |
 | `on_status(cb)` | `Problem.text` only; the 0.2.x shape. |
 | `on_connection(cb)` | `Connecting`, `Connected`, `Disconnected`. |
-| `queue_write(name, value)` | returns a `WriteHandle`; `wait()` blocks until the write went out, `ok` / `error` say how it went. `on_write(cb)` gets a `WriteResult` per flushed batch. |
+| `queue_write(name, value)` | returns a `WriteHandle`; `wait()` blocks until the write went out, `ok` / `error` say how it went. A write queued while not connected and enabled, or still pending when the link drops or the runtime is disabled, fails with `"not connected"`; nothing is held for a later connection. `on_write(cb)` gets a `WriteResult` per flushed batch. |
 
 Listeners run on the runtime's worker thread. A host with a main thread
 marshals to it itself, or polls `latest()` from its own loop.
@@ -60,7 +60,7 @@ The rules, from the class docstring:
 | Stateless read list | The symbols arrive with each `read`, never empty. |
 | One call, any number of requests | The driver may split a batch as its transport requires. |
 | Flat in, flat out | `ReadResult.values` is flat symbol name to value. The runtime nests it, so every vendor's data has the same shape. A value may itself be a list or dict when the vendor reads a whole array or struct as one symbol: B&R (OMJSON) returns structs and arrays whole; ADS returns arrays of a primitive type as a list, but a struct only when the driver was given a pyads `structure_def` for it, so with ADS read struct members one by one. |
-| Errors are not values | A symbol the PLC rejects goes in `ReadResult.errors`, or in the dict `write` returns. A failed connection or request raises; the runtime then asks `is_connected()` and reconnects if the transport is gone. |
+| Errors are not values | A symbol the PLC rejects goes in `ReadResult.errors`, or in the dict `write` returns, as a `SymbolError(text, code)`: `missing` when the PLC does not know the symbol, `rejected` when it refused the value, `other` otherwise. A plain `str` is accepted (taken as `other` for reads, `rejected` for writes). A failed connection or request raises; the runtime then asks `is_connected()` and reconnects if the transport is gone. |
 | Closed by the host | `disconnect` leaves the driver reusable; `close` (default: nothing) releases what it holds for good. The runtime never calls `close`, since it can be started again; whoever created the driver calls it after the last `stop()`. |
 | `symbol_separators` | `"."` for Beckhoff (`GVL.struct.member`), `":."` for B&R (`Program:struct.member`). |
 

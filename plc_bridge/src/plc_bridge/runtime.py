@@ -13,9 +13,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any, Callable, Iterable, Optional
+from types import MappingProxyType
+from typing import Any, Callable, Iterable, Mapping, Optional
 
-from .driver import PlcDriver
+from .driver import ERROR_MISSING, ERROR_OTHER, ERROR_REJECTED, PlcDriver, symbol_error
 from .symbols import nest
 
 logger = logging.getLogger(__name__)
@@ -47,37 +48,95 @@ IDLE_SEC = 1.0
 # An unchanged problem is repeated at this interval, so a status display that
 # expires old entries (the bridge UI drops them after 3 s) keeps showing it.
 PROBLEM_REPEAT_SEC = 2.0
+# WriteHandle.error of a write that was queued while the runtime was not
+# connected and enabled, or still pending when the connection dropped or the
+# runtime was disabled. Writes are never held for a later connection: a value
+# meant for the PLC as it was may be wrong for the PLC that comes back.
+WRITE_NOT_CONNECTED = "not connected"
+WRITE_STOPPED = "stopped"
+WRITE_SUPERSEDED = "superseded"
+
 # The longest refresh period honoured. Bounds Event.wait (which overflows on
 # huge values) and keeps a typo from parking the loop for hours.
 MAX_PERIOD_SEC = 60.0
 
 
+def freeze(value: Any) -> Any:
+    """
+    A read-only copy of nested data: dicts become MappingProxyType views of a
+    private copy, lists and tuples become tuples, anything else is returned
+    as is. Indexing works as before (`frozen["GVL"]["Axes"][0]`).
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(item) for item in value)
+    return value
+
+
+def thaw(value: Any) -> Any:
+    """The inverse of `freeze`: plain dicts and lists, a fresh copy a consumer may change."""
+    if isinstance(value, Mapping):
+        return {key: thaw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class Sample:
     """
-    One successful read.
+    One successful read. Read-only: one Sample goes to every listener and to
+    `latest()`, so a consumer that changed it would change it for the others.
 
     Attributes:
         seq: counts up by one per sample for the life of the runtime, so a
             consumer that polls `latest()` can tell a new sample from the one
             it already handled.
         t: time.monotonic() when the read returned.
-        values: flat symbol name -> value, as the driver returned them.
-        errors: symbol name -> reason for the symbols the PLC rejected in the
-            same read. A symbol is in one of the two dicts, never both.
+        values: flat symbol name -> value, as the driver returned them; a
+            read-only mapping (types.MappingProxyType). The values themselves
+            are not copied: a whole array the driver returned as a list is
+            that list. Use `nested` for data that is read-only all the way down.
+        errors: symbol name -> SymbolError (a str with a `.code`) for the
+            symbols the PLC failed in the same read; read-only like `values`.
+            A symbol is in one of the two dicts, never both.
         separators: the driver's symbol separators, for `nested`.
+
+    `dict(sample.values)` or `thaw(sample.nested)` gives a copy to change.
     """
 
     seq: int
     t: float
-    values: dict
-    errors: dict
+    values: Mapping
+    errors: Mapping
     separators: str = "."
 
+    def __post_init__(self):
+        # Wrapped here, so a Sample built by hand (a test, a replay) is
+        # read-only too. The runtime passes proxies of fresh dicts.
+        if not isinstance(self.values, MappingProxyType):
+            object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+        if not isinstance(self.errors, MappingProxyType):
+            object.__setattr__(self, "errors", MappingProxyType(
+                {name: symbol_error(reason) for name, reason in self.errors.items()}))
+
     @cached_property
-    def nested(self) -> dict:
-        """The values as nested dicts and lists ("GVL.Axes[0].Pos" -> data["GVL"]["Axes"][0]["Pos"])."""
-        return nest(self.values, self.separators)
+    def nested(self) -> Mapping:
+        """
+        The values as nested data ("GVL.Axes[0].Pos" -> data["GVL"]["Axes"][0]["Pos"]),
+        read-only all the way down: mappings are MappingProxyType, arrays are
+        tuples (a sparse array keeps None at the indexes not read). Mappings
+        compare equal to plain dicts; arrays compare equal to tuples, not
+        lists. `thaw(sample.nested)` is a mutable copy.
+        """
+        return freeze(nest(self.values, self.separators))
+
+    @property
+    def missing(self) -> tuple:
+        """The symbols the PLC does not know (error code ERROR_MISSING), sorted."""
+        return tuple(sorted(name for name, error in self.errors.items()
+                            if getattr(error, "code", ERROR_OTHER) == ERROR_MISSING))
 
 
 @dataclass(frozen=True)
@@ -91,6 +150,9 @@ class Problem:
             read problem has cleared.
         text: the human readable form ("Error Reading: GVL.x: symbol not found").
         symbols: the symbols involved, when known.
+
+    Branch on `kind` and `symbols` (and on the error codes in Sample.errors /
+    WriteResult.errors), never on `text`: the text carries vendor wording.
     """
 
     kind: str
@@ -101,9 +163,18 @@ class Problem:
 class WriteHandle:
     """
     The fate of one queued write. `wait()` blocks until the write was sent (or
-    failed); `error` is None on success, otherwise the reason. A later write of
-    the same symbol replaces a pending one, and the replaced handle is resolved
-    with error "superseded".
+    failed); `error` is None on success, otherwise the reason:
+
+    * a SymbolError (a str with `.code` ERROR_MISSING or ERROR_REJECTED) when
+      the PLC failed this symbol;
+    * WRITE_NOT_CONNECTED ("not connected") when the runtime was not connected
+      and enabled when the write was queued, or the connection dropped or the
+      runtime was disabled before it went out. Writes are never held for a
+      later connection;
+    * WRITE_SUPERSEDED ("superseded") when a later write of the same symbol
+      replaced this pending one;
+    * WRITE_STOPPED ("stopped") when stop() found it pending;
+    * the error text when the whole request failed.
     """
 
     def __init__(self, name: str, value: Any):
@@ -140,7 +211,7 @@ class WriteResult:
 
     Attributes:
         values: what was sent.
-        errors: symbol -> reason for the symbols the PLC rejected.
+        errors: symbol -> SymbolError for the symbols the PLC failed.
         error: the reason when the whole request failed, else None.
     """
 
@@ -282,6 +353,8 @@ class PlcRuntime:
         # refresh period into that rate.
         changed = value != self._enabled
         self._enabled = value
+        if not value:
+            self._fail_pending_writes(WRITE_NOT_CONNECTED)
         self._emit(EVENT_ENABLED, value)
         if changed:
             self._wake()
@@ -388,15 +461,23 @@ class PlcRuntime:
         A later value for the same symbol replaces a pending one (whose handle
         is resolved with error "superseded").
 
+        While the runtime is not connected and enabled the write is not
+        queued: the handle comes back resolved with error "not connected".
+        A write still pending when the connection drops or the runtime is
+        disabled is failed the same way.
+
         Returns:
             A WriteHandle to wait on or inspect. Ignore it if you do not care.
         """
         handle = WriteHandle(name, value)
+        if not (self._is_connected and self._enabled):
+            handle._resolve(WRITE_NOT_CONNECTED)
+            return handle
         with self._write_lock:
             previous = self._write_queue.get(name)
             self._write_queue[name] = (value, handle)
         if previous is not None:
-            previous[1]._resolve("superseded")
+            previous[1]._resolve(WRITE_SUPERSEDED)
         self._wake()
         return handle
 
@@ -449,8 +530,8 @@ class PlcRuntime:
             # out, but if it is stuck inside a driver call this is what unblocks
             # it (the contract asks disconnect() to do that) and what guarantees
             # the PLC link is closed when stop() returns. disconnect() is idempotent.
+            self._fail_pending_writes(WRITE_STOPPED)
             report = self._close_connection()
-            self._fail_pending_writes("stopped")
         # Outside the lock: a DISCONNECTED listener may call start() or stop().
         if report:
             self._emit(EVENT_CONNECTION, DISCONNECTED)
@@ -547,8 +628,9 @@ class PlcRuntime:
 
         try:
             result = self._driver.read(symbols)
-            sample = Sample(self._seq + 1, time.monotonic(), dict(result.values),
-                            dict(result.errors), self._driver.symbol_separators)
+            errors = {name: symbol_error(reason, ERROR_OTHER) for name, reason in (result.errors or {}).items()}
+            sample = Sample(self._seq + 1, time.monotonic(), MappingProxyType(dict(result.values)),
+                            MappingProxyType(errors), self._driver.symbol_separators)
             if sample.values:
                 sample.nested  # parse now: a name the parser cannot index is a read problem
         except Exception as e:
@@ -583,13 +665,18 @@ class PlcRuntime:
         return True
 
     def _scan_write(self, run) -> bool:
-        if not self._is_connected or not self._write_queue:
+        if not self._write_queue:
+            return False
+        if not (self._is_connected and self._enabled):
+            # Queued while connected, but the link (or `enabled`) went away first.
+            self._fail_pending_writes(WRITE_NOT_CONNECTED)
             return False
         with self._write_lock:
             queued, self._write_queue = self._write_queue, {}
         values = {name: value for name, (value, _) in queued.items()}
         try:
-            errors = dict(self._driver.write(values) or {})
+            errors = {name: symbol_error(reason, ERROR_REJECTED)
+                      for name, reason in (self._driver.write(values) or {}).items()}
         except Exception as e:
             if self._superseded(run):
                 self._resolve_writes(queued, {}, str(e))
@@ -634,6 +721,8 @@ class PlcRuntime:
             self._is_connected = False
             self._driver.disconnect()
             report, self._was_connected = self._was_connected, False
+        # A write queued for the connection that just closed never goes out.
+        self._fail_pending_writes(WRITE_NOT_CONNECTED)
         return report
 
     def _drop_connection(self):
