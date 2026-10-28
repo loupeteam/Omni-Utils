@@ -23,21 +23,21 @@ def Scope "PLC"
     def Scope "PLC1"
     {
         custom string   bridge:driver        = "beckhoff"
-        custom bool     bridge:Enable        = false
-        custom int      bridge:RefreshRate   = 20
-        custom string[] bridge:Variables     = ["GVL.Axes[0].ActualPosition", "GVL.Command.Blend"]
-        custom bool     bridge:MirrorToUsd   = true
-        custom string[] bridge:MirrorSymbols = []
-        custom string   beckhoff:AmsNetId    = "10.20.30.40.1.1"
+        custom bool     bridge:enable        = false
+        custom int      bridge:periodMs   = 20
+        custom string[] bridge:variables     = ["GVL.Axes[0].ActualPosition", "GVL.Command.Blend"]
+        custom bool     bridge:mirrorToUsd   = true
+        custom string[] bridge:mirrorSymbols = []
+        custom string   beckhoff:amsNetId    = "10.20.30.40.1.1"
     }
     def Scope "PLC2"
     {
         custom string   bridge:driver        = "br"
-        custom bool     bridge:Enable        = false
-        custom int      bridge:RefreshRate   = 20
-        custom string[] bridge:Variables     = ["TestProg:counter", "TestProg:structOfStructs"]
-        custom string   br:Host              = "192.168.1.10"
-        custom int      br:Port              = 8000
+        custom bool     bridge:enable        = false
+        custom int      bridge:periodMs   = 20
+        custom string[] bridge:variables     = ["TestProg:counter", "TestProg:structOfStructs"]
+        custom string   br:host              = "192.168.1.10"
+        custom int      br:port              = 8000
     }
 }
 ```
@@ -45,12 +45,12 @@ def Scope "PLC"
 | Attribute | Type | Default | Meaning |
 |---|---|---|---|
 | `bridge:driver` | string | required | the registered driver name (`beckhoff`, `br`) |
-| `bridge:Enable` | bool | false | connect and poll |
-| `bridge:RefreshRate` | int | 20 | scan period in milliseconds |
-| `bridge:Variables` | string[] | [] | the symbols read every scan |
-| `bridge:MirrorToUsd` | bool | true | mirror the values as prims under the PLC prim (see below) |
-| `bridge:MirrorSymbols` | string[] | [] | mirror only these symbols (and everything under them); empty means all |
-| `<driver>:<Option>` | per driver | per driver | the driver's options, e.g. `beckhoff:AmsNetId`, `br:Host`, `br:Port` |
+| `bridge:enable` | bool | false | connect and poll |
+| `bridge:periodMs` | int | 20 | scan period in milliseconds |
+| `bridge:variables` | string[] | [] | the symbols read every scan |
+| `bridge:mirrorToUsd` | bool | true | mirror the values as prims under the PLC prim (see below) |
+| `bridge:mirrorSymbols` | string[] | [] | mirror only these symbols (and everything under them); empty means all |
+| `<driver>:<Option>` | per driver | per driver | the driver's options, e.g. `beckhoff:amsNetId`, `br:host`, `br:port` |
 
 A driver option declared `secret` (a password, a token) is never stored in
 clear: its attribute holds `env:NAME` or `setting:/path`, which the framework
@@ -68,7 +68,7 @@ at all. The window's "Write To USD" button rewrites a prim in the neutral form
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `/exts/loupe.simulation.bridge/autoConnect` | true | When false, a prim with `bridge:Enable = true` still comes up disabled, so a committed stage cannot open a connection to hardware by surprise. The window says why; enable from there or from code. |
+| `/exts/loupe.simulation.bridge/autoConnect` | true | When false, a prim with `bridge:enable = true` still comes up disabled, so a committed stage cannot open a connection to hardware by surprise. The window says why; enable from there or from code. |
 | `/exts/loupe.simulation.bridge/legacyBusNames` | true | Also push the vendor-named bus events (`loupe.simulation.beckhoff_bridge.*`, `loupe.simulation.br_bridge.*`) and accept requests on them. |
 
 ## Getting the data
@@ -101,8 +101,8 @@ What a 0.2.x script that reached the runtime through
 `get_system().get_component(name)` still finds: `enable_communication`,
 `refresh_rate` / `refresh_period_ms`, `read_variables`, `set_read_variables`,
 `queue_write`, `is_connected`, `plc`, `driver`, `name`. Narrower than 0.2.x:
-`options` returns the neutral keys (`bridge:Enable`, `bridge:RefreshRate`,
-`bridge:Variables` **as a list**, `bridge:MirrorToUsd`, `bridge:MirrorSymbols`,
+`options` returns the neutral keys (`bridge:enable`, `bridge:periodMs`,
+`bridge:variables` **as a list**, `bridge:mirrorToUsd`, `bridge:mirrorSymbols`,
 `<driver>:<Option>`), and the vendor properties `ams_net_id`, `host`, `port`
 are gone: read `driver_options` or the driver object (`runtime.driver.ams_net_id`),
 write with `set_driver_option("AmsNetId", ...)`. The options setter still
@@ -111,7 +111,7 @@ string).
 
 ## The USD mirror
 
-When `bridge:MirrorToUsd` is true (the default in 0.3; off by default from
+When `bridge:mirrorToUsd` is true (the default in 0.3; off by default from
 0.4) every value read is mirrored under the PLC prim, in the session layer
 (never saved, never a pending change):
 
@@ -141,15 +141,18 @@ from beckhoff_bridge import AdsDriver
 
 registry.register(
     "beckhoff", AdsDriver,
-    [Option("AmsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
+    [Option("amsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
     legacy_namespace="beckhoff_bridge",     # 0.2.x prims and bus names
     title="Beckhoff (ADS)",
 )
 ```
 
-`Option(key, kind, default, label, secret=False, arg=None)` with kinds `str`,
-`int`, `float`, `bool`, `str_list`. The driver's constructor gets one keyword
-per option, `arg` or the key in snake_case (`AmsNetId` -> `ams_net_id`); a
+`Option(key, kind, default, label, secret=False, arg=None, legacy_key=None)`
+with kinds `str`, `int`, `float`, `bool`, `str_list`. `key` is lowerCamelCase
+(`beckhoff:amsNetId`); `legacy_key` is the option's 0.2.x name under the legacy
+namespace and defaults to the key with a capital first letter
+(`beckhoff_bridge:AmsNetId`). The driver's constructor gets one keyword per
+option, `arg` or the key in snake_case (`amsNetId` -> `ams_net_id`); a
 changed option is assigned to the live driver as an attribute of the same
 name and the connection is reopened. `registry.unregister(name)` in
 `on_shutdown`; the 0.3.0 vendor extensions do exactly that.
@@ -171,8 +174,13 @@ extension's `wheels/` folder: run `python tools/build_wheels.py` at the repo
 root before packaging. From a clone, `python tools/dev_link.py <kit build
 root>` installs the checkout editable into Kit's Python instead (see the
 repo README). One of the two is required: a clean clone with neither falls
-through to PyPI, where `plc-bridge==0.3.0` does not exist, and the
+through to PyPI, where `plc-bridge` 0.3 does not exist, and the
 extension fails to start.
+
+The pin is a range, `plc-bridge>=0.3.0,<0.4`: any 0.3 release of the
+library from the one this framework release was built against. Each
+framework release raises the lower bound to its own library version, so the
+startup check below reports an older library left in Kit's pip folder.
 
 Kit's pip installer decides that a requirement is met when its module
 imports; it never compares versions. A package left in the app's pip folder

@@ -6,7 +6,16 @@ Copyright (c) 2024 Loupe, https://loupe.team
 Part of Omni-Utils, licensed under the MIT License.
 """
 
-from .driver import PlcDriver, ReadResult
+from .driver import (
+    ERROR_CODES,
+    ERROR_MISSING,
+    ERROR_OTHER,
+    ERROR_REJECTED,
+    PlcDriver,
+    ReadResult,
+    SymbolError,
+    symbol_error,
+)
 from .runtime import (
     CONNECTED,
     CONNECTING,
@@ -25,19 +34,35 @@ from .runtime import (
     PlcRuntime,
     Problem,
     Sample,
+    WRITE_NOT_CONNECTED,
+    WRITE_STOPPED,
+    WRITE_SUPERSEDED,
     WriteHandle,
     WriteResult,
+    freeze,
+    thaw,
 )
 from .symbols import nest, nest_symbol
 
 __all__ = [
     "PlcDriver",
     "ReadResult",
+    "SymbolError",
+    "symbol_error",
+    "ERROR_CODES",
+    "ERROR_MISSING",
+    "ERROR_REJECTED",
+    "ERROR_OTHER",
     "PlcRuntime",
     "Sample",
     "Problem",
     "WriteHandle",
     "WriteResult",
+    "WRITE_NOT_CONNECTED",
+    "WRITE_STOPPED",
+    "WRITE_SUPERSEDED",
+    "freeze",
+    "thaw",
     "nest",
     "nest_symbol",
     "EVENT_SAMPLE",

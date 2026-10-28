@@ -86,7 +86,7 @@ def test_connects_reads_and_emits_nested_data(plc, driver):
     rec = Recorder(plc)
     assert plc.scan_read() is True
     assert rec.connection == [CONNECTING, CONNECTED]
-    assert rec.data == [{"GVL": {"a": 1, "arr": [None, 2]}}]
+    assert rec.data == [{"GVL": {"a": 1, "arr": (None, 2)}}]
     assert driver.reads == [["GVL.a", "GVL.arr[1]"]]
     assert plc.is_connected
 
@@ -177,12 +177,87 @@ def test_writes_are_batched_and_last_value_wins(plc, driver):
     assert plc.scan_write() is False
 
 
-def test_writes_wait_for_a_connection(plc, driver):
-    plc.queue_write("GVL.a", 1)
-    assert plc.scan_write() is False
+def test_a_write_queued_while_disconnected_fails_at_once(plc, driver):
+    from plc_bridge import WRITE_NOT_CONNECTED
+    results = []
+    plc.on_write(results.append)
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.done and not handle.ok and handle.error == WRITE_NOT_CONNECTED == "not connected"
+    plc.scan_read()                       # connects
+    assert plc.scan_write() is False      # nothing was held for the connection
+    assert driver.writes == [] and results == []
+
+
+def test_a_write_queued_while_disabled_fails_at_once(driver):
+    plc = PlcRuntime(driver, name="D")
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.done and handle.error == "not connected"
+
+
+def test_a_write_racing_a_disconnect_is_refused_not_held(plc, driver):
+    # The link drops while queue_write waits for the queue: the write must be
+    # refused, not slip in after the drain and reach the next connection.
+    from plc_bridge import WRITE_NOT_CONNECTED
     plc.scan_read()
-    assert plc.scan_write() is True
-    assert driver.writes == [{"GVL.a": 1}]
+    real = plc._write_lock
+
+    class DropFirst:
+        armed = True
+
+        def __enter__(self):
+            if DropFirst.armed:
+                DropFirst.armed = False
+                plc._write_lock = real
+                plc._close_connection()
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    plc._write_lock = DropFirst()
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.done and handle.error == WRITE_NOT_CONNECTED
+    plc.scan_read()                       # reconnects
+    assert plc.scan_write() is False and driver.writes == []
+
+
+def test_every_write_error_carries_a_code(plc, driver):
+    from plc_bridge import ERROR_OTHER, WRITE_NOT_CONNECTED, WRITE_SUPERSEDED
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.error == WRITE_NOT_CONNECTED and handle.error.code == ERROR_OTHER
+    plc.scan_read()
+    first = plc.queue_write("GVL.a", 1)
+    plc.queue_write("GVL.a", 2)
+    assert first.error == WRITE_SUPERSEDED and first.error.code == ERROR_OTHER
+
+
+def test_disable_fails_pending_writes(plc, driver):
+    plc.scan_read()
+    handle = plc.queue_write("GVL.a", 1)
+    assert not handle.done
+    plc.enabled = False
+    assert handle.done and handle.error == "not connected"
+    plc.scan()
+    assert driver.writes == []
+
+
+def test_a_dropped_connection_fails_pending_writes(plc, driver):
+    plc.scan_read()
+    handle = plc.queue_write("GVL.a", 1)
+    plc.reconnect()            # drops the link on the next read
+    plc.scan_read()
+    assert handle.done and handle.error == "not connected"
+    plc.scan_write()
+    assert driver.writes == []
+
+
+def test_a_write_pending_when_the_link_went_away_is_failed_by_the_scan(plc, driver):
+    plc.scan_read()
+    handle = plc.queue_write("GVL.a", 1)
+    plc._is_connected = False  # the state a peer drop leaves before the next scan
+    assert plc.scan_write() is False
+    assert handle.done and handle.error == "not connected"
+    assert driver.writes == []
 
 
 def test_rejected_symbols_of_a_write_are_a_status(plc, driver):
@@ -965,7 +1040,7 @@ def test_samples_carry_seq_time_flat_values_and_nest_lazily(plc, driver):
     plc.scan()
     assert [s.seq for s in samples] == [1, 2]
     assert samples[0].values == {"GVL.a": 1, "GVL.arr[1]": 2}
-    assert samples[0].nested == {"GVL": {"a": 1, "arr": [None, 2]}}
+    assert samples[0].nested == {"GVL": {"a": 1, "arr": (None, 2)}}
     assert samples[0].separators == "."
     assert samples[1].t >= samples[0].t
     assert plc.latest() is samples[1]
@@ -1045,6 +1120,7 @@ def test_write_handle_carries_a_whole_request_failure(plc, driver):
 
 
 def test_a_superseded_write_is_told_so(plc):
+    plc.scan_read()
     first = plc.queue_write("GVL.a", 1)
     second = plc.queue_write("GVL.a", 2)
     assert first.done and first.error == "superseded"
@@ -1052,11 +1128,105 @@ def test_a_superseded_write_is_told_so(plc):
 
 
 def test_pending_writes_fail_on_stop(plc):
-    plc.start()
+    plc.scan_read()            # connected, no worker: the write stays queued
     handle = plc.queue_write("GVL.zzz", 1)
-    plc.enabled = False  # never connects, so the write stays queued
+    plc._run = type("R", (), {"stop": threading.Event(), "wake": threading.Event(),
+                              "thread": threading.current_thread()})()
     plc.stop()
     assert handle.done and handle.error == "stopped"
+
+
+# region - read-only samples and symbol error codes
+
+def test_sample_dicts_are_read_only(plc, driver):
+    from types import MappingProxyType
+    plc.scan()
+    sample = plc.latest()
+    assert isinstance(sample.values, MappingProxyType) and isinstance(sample.errors, MappingProxyType)
+    with pytest.raises(TypeError):
+        sample.values["GVL.a"] = 5
+    with pytest.raises(TypeError):
+        sample.errors["x"] = "y"
+    with pytest.raises(TypeError):
+        sample.nested["GVL"]["a"] = 5
+    with pytest.raises(TypeError):
+        sample.nested["GVL"]["arr"][1] = 5
+    assert sample.nested["GVL"]["arr"][1] == 2
+    # the driver's own dicts are not shared with the sample
+    driver.values["GVL.a"] = 99
+    assert sample.values["GVL.a"] == 1
+
+
+def test_nested_access_into_arrays_of_structs_works():
+    from plc_bridge import Sample, thaw
+    s = Sample(1, 0.0, {"GVL.Axes[0].Pos": 1.5, "GVL.Axes[2].Pos": 3.0}, {})
+    assert s.nested["GVL"]["Axes"][0]["Pos"] == 1.5
+    assert s.nested["GVL"]["Axes"][1] is None
+    assert len(s.nested["GVL"]["Axes"]) == 3
+    plain = thaw(s.nested)
+    plain["GVL"]["Axes"][1] = {"Pos": 2.0}
+    assert plain == {"GVL": {"Axes": [{"Pos": 1.5}, {"Pos": 2.0}, {"Pos": 3.0}]}}
+    assert s.nested["GVL"]["Axes"][1] is None
+
+
+def test_a_hand_built_sample_is_read_only_too():
+    from plc_bridge import ERROR_OTHER, Sample
+    s = Sample(1, 0.0, {"a": 1}, {"b": "bad"})
+    with pytest.raises(TypeError):
+        s.values["a"] = 2
+    assert s.errors["b"] == "bad" and s.errors["b"].code == ERROR_OTHER
+
+
+def test_a_sample_pickles_and_deep_copies():
+    import copy
+    import pickle
+    from plc_bridge import ERROR_MISSING, Sample, SymbolError
+    s = Sample(3, 1.5, {"GVL.arr": [1, 2]}, {"GVL.x": SymbolError("symbol not found", ERROR_MISSING)})
+    for again in (pickle.loads(pickle.dumps(s)), copy.deepcopy(s)):
+        assert again == s and again.missing == ("GVL.x",)
+        assert again.errors["GVL.x"].code == ERROR_MISSING
+        with pytest.raises(TypeError):
+            again.values["GVL.arr"] = 0
+
+
+def test_symbol_error_is_a_str_with_a_code():
+    import pickle
+    from plc_bridge import ERROR_MISSING, SymbolError
+    e = SymbolError("symbol not found", ERROR_MISSING)
+    assert e == "symbol not found" and isinstance(e, str)
+    assert f"x: {e}" == "x: symbol not found"
+    assert e.code == "missing" and e.text == "symbol not found" and type(e.text) is str
+    again = pickle.loads(pickle.dumps(e))
+    assert again == e and again.code == ERROR_MISSING
+    with pytest.raises(ValueError):
+        SymbolError("x", "nope")
+
+
+def test_read_errors_carry_codes_and_missing_lists_them(plc, driver):
+    from plc_bridge import ERROR_MISSING, ERROR_OTHER, SymbolError
+    plc.set_read_variables(["GVL.a", "GVL.gone", "GVL.odd"])
+    driver.errors = {"GVL.gone": SymbolError("symbol not found", ERROR_MISSING), "GVL.odd": "plain text"}
+    plc.scan()
+    sample = plc.latest()
+    assert sample.errors["GVL.gone"].code == ERROR_MISSING
+    assert sample.errors["GVL.odd"].code == ERROR_OTHER   # a plain str from an older driver
+    assert sample.missing == ("GVL.gone",)
+
+
+def test_write_errors_carry_codes(plc, driver):
+    from plc_bridge import ERROR_MISSING, ERROR_REJECTED, SymbolError
+    results = []
+    plc.on_write(results.append)
+    plc.scan()
+    driver.write_rejects = {"GVL.b": "out of range", "GVL.c": SymbolError("unknown", ERROR_MISSING)}
+    b = plc.queue_write("GVL.b", 1)
+    c = plc.queue_write("GVL.c", 1)
+    plc.scan_write()
+    assert b.error == "out of range" and b.error.code == ERROR_REJECTED   # plain str -> rejected
+    assert c.error.code == ERROR_MISSING
+    assert results[0].errors["GVL.b"].code == ERROR_REJECTED
+
+# endregion
 
 
 def test_a_scan_writes_before_it_reads(plc, driver):

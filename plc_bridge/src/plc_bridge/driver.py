@@ -9,7 +9,57 @@ Plain Python: nothing in this package may import from Omniverse or Kit.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
+
+# Codes of a per-symbol error (SymbolError.code). Branch on these, never on the
+# vendor text, which differs between vendors, firmware and library versions.
+ERROR_MISSING = "missing"    # the PLC does not know the symbol
+ERROR_REJECTED = "rejected"  # the PLC knows the symbol but refused the value
+ERROR_OTHER = "other"        # anything else the vendor reported for one symbol
+ERROR_CODES = (ERROR_MISSING, ERROR_REJECTED, ERROR_OTHER)
+
+
+class SymbolError(str):
+    """
+    Why the PLC failed one symbol: the vendor's text plus a standard code.
+
+    A str subclass, so code written against 0.3.0 pre-releases that printed,
+    compared or formatted the error text keeps working
+    (`errors["GVL.x"] == "symbol not found"` is still true); new code branches
+    on `.code`, one of ERROR_MISSING, ERROR_REJECTED, ERROR_OTHER.
+
+        SymbolError("symbol not found", ERROR_MISSING)
+    """
+
+    def __new__(cls, text: str = "", code: str = ERROR_OTHER):
+        if code not in ERROR_CODES:
+            raise ValueError(f"symbol error code must be one of {ERROR_CODES}, got {code!r}")
+        self = super().__new__(cls, text)
+        self.code = code
+        return self
+
+    @property
+    def text(self) -> str:
+        """The vendor's text, as a plain str."""
+        return str.__str__(self)
+
+    def __reduce__(self):
+        return (SymbolError, (self.text, self.code))
+
+    def __repr__(self):
+        return f"SymbolError({self.text!r}, {self.code!r})"
+
+
+def symbol_error(reason: Any, default_code: str = ERROR_OTHER) -> SymbolError:
+    """
+    A SymbolError from whatever a driver returned: a SymbolError is kept, any
+    other value becomes its text with `default_code`. The runtime applies this
+    to every error a driver reports, so a driver that still returns plain
+    strings works (reads get ERROR_OTHER, writes ERROR_REJECTED).
+    """
+    if isinstance(reason, SymbolError):
+        return reason
+    return SymbolError("" if reason is None else str(reason), default_code)
 
 
 @dataclass
@@ -25,9 +75,11 @@ class ReadResult:
             struct as one symbol: B&R (OMJSON) returns both whole; ADS returns
             arrays of a primitive type as lists, and a struct only when the
             driver has a pyads structure_def for it.
-        errors: symbol name -> reason, for symbols the PLC rejected. A symbol is
-            in one of the two dicts, never both. An error is never delivered as
-            a value.
+        errors: symbol name -> SymbolError (the vendor text plus a code,
+            ERROR_MISSING / ERROR_REJECTED / ERROR_OTHER), for symbols the PLC
+            failed. A plain str is accepted and taken as ERROR_OTHER. A symbol
+            is in one of the two dicts, never both. An error is never delivered
+            as a value.
     """
 
     values: dict = field(default_factory=dict)
@@ -62,7 +114,7 @@ class PlcDriver(ABC):
       batch; the driver may split it as the transport requires (ADS sum
       commands chunk, OMJSON has a message size limit).
     * **Failures.** A symbol the PLC rejects goes into `ReadResult.errors` or
-      the dict returned by `write`. A failure of the connection or the whole
+      the dict returned by `write`, as a SymbolError carrying a standard code. A failure of the connection or the whole
       request raises; the runtime reports it, asks `is_connected()`, and either
       keeps polling or reconnects.
     * **Closed once, by the host.** `disconnect` leaves the driver reusable
@@ -114,12 +166,14 @@ class PlcDriver(ABC):
         """Read the symbols. Never called with an empty list."""
 
     @abstractmethod
-    def write(self, values: Mapping[str, Any]) -> Mapping[str, str]:
+    def write(self, values: Mapping[str, Any]) -> Optional[Mapping[str, str]]:
         """
         Write flat symbol name -> value.
 
         Returns:
-            symbol name -> reason for each symbol the PLC rejected; empty (or
-            None) when every write succeeded. Raise only when the whole request
-            failed.
+            symbol name -> SymbolError for each symbol the PLC failed
+            (ERROR_MISSING when it does not know the symbol, ERROR_REJECTED
+            when it refused the value); a plain str is accepted and taken as
+            ERROR_REJECTED. Empty (or None) when every write succeeded. Raise
+            only when the whole request failed.
         """

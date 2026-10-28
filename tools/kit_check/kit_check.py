@@ -195,15 +195,15 @@ async def main():
     ok2 = bk.read_variables == ["A.b", "C.d"]
     bk.set_read_variables(before)
     bk.refresh_rate = 20
-    br.options = {"bridge:RefreshRate": 25}
+    br.options = {"bridge:periodMs": 25}
     ok3 = br.refresh_rate == 25
     br.refresh_rate = 20
     print("  options set  legacy partial={} legacy replace={} neutral={}".format(ok1, ok2, ok3))
     if not (ok1 and ok2 and ok3):
         fails.append("Runtime.options setter broken")
     if mock is not None:
-        br.options = {"br:Port": mock.port}
-        print("  br:Port      -> {} (driver.port={})".format(mock.port, br.driver.port))
+        br.options = {"br:port": mock.port}
+        print("  br:port      -> {} (driver.port={})".format(mock.port, br.driver.port))
         if br.driver.port != mock.port:
             fails.append("driver option change did not reach the driver")
 
@@ -355,7 +355,7 @@ async def main():
     settings = carb.settings.get_settings()
     for path in ("/PLC/PLC1", "/PLC/BR1"):
         prim = stage.GetPrimAtPath(path)
-        for name in ("beckhoff_bridge:Enable", "bridge:Enable"):
+        for name in ("beckhoff_bridge:Enable", "bridge:enable"):
             a = prim.GetAttribute(name)
             if a.IsValid():
                 a.Set(True)
@@ -370,12 +370,12 @@ async def main():
         fails.append("autoConnect=false did not hold the enabled prims")
     settings.set("/exts/loupe.simulation.bridge/autoConnect", True)
     if mock is not None:
-        br2.options = {"br:Port": mock.port}
+        br2.options = {"br:port": mock.port}
     system.cleanup()
     system.find_and_create_components()
     bk3, br3 = system.get_component("PLC1"), system.get_component("BR1")
     if mock is not None:
-        br3.options = {"br:Port": mock.port}
+        br3.options = {"br:port": mock.port}
     await ticks(30)
     print("  autoConnect  true  -> enabled {} connected {}".format(
         (bk3.enable_communication, br3.enable_communication), (bk3.is_connected, br3.is_connected)))

@@ -8,12 +8,37 @@ were vendored into each vendor extension as a git submodule
 vendor code behind a driver registry.
 
 ### Added
+- Prim attributes and driver option keys are lowerCamelCase, the USD
+  convention: `bridge:enable`, `bridge:periodMs` (the scan period in ms),
+  `bridge:variables`, `bridge:mirrorToUsd`, `bridge:mirrorSymbols`;
+  `Option(key=...)` keys likewise (`amsNetId` -> `beckhoff:amsNetId`). The
+  0.2.x attributes keep their spelling (`beckhoff_bridge:AmsNetId`); an
+  option's 0.2.x name is `Option.legacy_name` (the key with a capital first
+  letter, or `legacy_key`).
+- Symbol error codes: every per-symbol error (`Sample.errors`,
+  `WriteResult.errors`, `WriteHandle.error`) is a `plc_bridge.SymbolError`, a
+  `str` with `.code` `missing`, `rejected` or `other`. `Sample.missing` lists
+  the symbols the PLC does not know. The bus WRITE payload carries `codes`.
+  `WriteHandle.error` reasons that are not about the symbol (`not connected`,
+  `superseded`, `stopped`, a failed request) carry `other`, so `.code` is
+  always there.
+- `Sample.values`, `Sample.errors` and `Sample.nested` are read-only
+  (`MappingProxyType`, arrays in `nested` as tuples); `plc_bridge.thaw()`
+  makes a mutable copy. The bus sends a plain copy.
+- A write queued while the PLC is disconnected or disabled fails at once with
+  `"not connected"`, as does one pending when the link drops or the PLC is
+  disabled; writes are never held for a later connection.
+  A write that comes in over the bus (`Manager.write_variable`, a 0.2.x
+  script) has no handle to report this, so the bus adapter logs one warning
+  per disconnected spell naming the dropped symbols.
+- `System.get_component`, `get_component_names` and `add_component` are the
+  public System API; the rest of System is documented as internal.
 - Driver registry: `registry.register(name, driver_class, option_schema, defaults, ui_panel)`
   with `Option(key, kind, default, label, secret=False)`. A `secret` option
   holds an `env:NAME` or `setting:/path` reference on the prim, never the value.
-- Neutral prim schema: `bridge:driver`, `bridge:Enable`, `bridge:RefreshRate`,
-  `bridge:Variables` (a `string[]`), `bridge:MirrorToUsd`, `bridge:MirrorSymbols`,
-  and the driver's options under its namespace (`beckhoff:AmsNetId`, `br:Host`).
+- Neutral prim schema: `bridge:driver`, `bridge:enable`, `bridge:periodMs`,
+  `bridge:variables` (a `string[]`), `bridge:mirrorToUsd`, `bridge:mirrorSymbols`,
+  and the driver's options under its namespace (`beckhoff:amsNetId`, `br:host`).
   A PLC prim is recognised by `bridge:driver`; `/PLC/<name>` is the convention.
 - One `Runtime` adapter over `plc_bridge.PlcRuntime` for every driver, in
   place of the vendor extensions' copies.
@@ -42,24 +67,26 @@ vendor code behind a driver registry.
   submodule paths keep working.
 
 ### Changed
-- The USD mirror is a registered component, created when `bridge:MirrorToUsd`
+- The USD mirror is a registered component, created when `bridge:mirrorToUsd`
   is true (default on in 0.3, off from 0.4), fed by `on_sample_main` instead
   of the bus. It uses the sample's flat values directly: a write-back from a
   mirror prim goes out under the symbol the value was read with, so a B&R
   `TestProg:lreal` keeps its colon (0.2.x re-derived `TestProg.lreal`). Arrays
   read whole and `None`-padded arrays mirror as `_<index>` prims.
-- `bridge:MirrorSymbols` narrows the mirror to a watch list.
+- `bridge:mirrorSymbols` narrows the mirror to a watch list.
 - A sparse array (`Axes[2]` read, `Axes[0]` not) goes out on the bus as a
   dict keyed by index strings, `{"2": {...}}`. That is what carb already made
   of the `None`-padded list in 0.2.x, but carb logged a warning per missing
   element per push, and Kit kept those log lines: the process grew about 1 MB
   a minute while data flowed. `on_sample`, `on_sample_main` and `latest()`
-  still get the padded list.
+  still get the padded array, a tuple in `Sample.nested`.
 - The mirror writes, and reacts to edits, only while its stage is the
   context's open stage, so replacing the stage while a PLC is delivering data
   no longer writes into the outgoing stage.
-- `plc-bridge` is a pip requirement pinned exactly by this extension; the
-  wheel ships in `wheels/` until the package is on PyPI.
+- `plc-bridge` is a pip requirement pinned by this extension as a range,
+  `plc-bridge>=0.3.0,<0.4`; each framework release raises the lower bound so
+  the startup version check catches a stale install. The wheel ships in
+  `wheels/` until the package is on PyPI.
 - Closing or replacing the stage no longer waits on the PLCs: each runtime is
   stopped and its driver closed on a thread of its own. Before, a B&R PLC
   that stopped answering held the main thread for 5 s per PLC.
@@ -72,7 +99,7 @@ vendor code behind a driver registry.
 - `get_system().get_component(name)` keeps `enable_communication`,
   `refresh_rate` / `refresh_period_ms`, `read_variables`,
   `set_read_variables`, `queue_write`, `is_connected`, `plc`, `driver`,
-  `name`. `options` now returns the neutral keys with `bridge:Variables` as a
+  `name`. `options` now returns the neutral keys with `bridge:variables` as a
   list; the vendor properties `ams_net_id`, `host`, `port` are gone (use
   `driver_options`, `set_driver_option`, or the driver object).
 

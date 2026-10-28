@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 BECKHOFF = dict(
     name="beckhoff",
-    options=[Option("AmsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
+    options=[Option("amsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
     legacy_namespace="beckhoff_bridge",
     title="Beckhoff (ADS)",
 )
@@ -25,8 +25,8 @@ BECKHOFF = dict(
 BR = dict(
     name="br",
     options=[
-        Option("Host", "str", "127.0.0.1", "PLC address"),
-        Option("Port", "int", 8000, "OMJSON port"),
+        Option("host", "str", "127.0.0.1", "PLC address"),
+        Option("port", "int", 8000, "OMJSON port"),
     ],
     legacy_namespace="br_bridge",
     title="B&R (OMJSON)",

@@ -22,8 +22,10 @@ them.
 
 ## Installing the extension
 
-`loupe.simulation.bridge` lists `plc-bridge==<version>` as a pip requirement
-that Kit installs before the extension starts. Two ways to make it available:
+`loupe.simulation.bridge` lists `plc-bridge>=<version>,<<next minor>` (0.3.0:
+`plc-bridge>=0.3.0,<0.4`) as a pip requirement that Kit installs before the
+extension starts. Raise the lower bound with each framework release, so the
+startup version check catches a stale install. Two ways to make it available:
 
 **From a registry or a packaged extension.** Until `plc-bridge` is on PyPI its
 wheel ships inside the extension, in `exts/loupe.simulation.bridge/wheels/`
@@ -52,7 +54,7 @@ them again (it leaves their dependencies, `pyads` and `websockets`, behind).
 with `tomllib`); the Kit Python it installs into is 3.10+ as usual.
 
 One of the two is required. A clean clone with neither the wheel built nor
-the dev link falls through to PyPI, where `plc-bridge==0.3.0` does not
+the dev link falls through to PyPI, where `plc-bridge` 0.3 does not
 exist, and the extension fails to start; CI and registry packaging must run
 `tools/build_wheels.py` first.
 

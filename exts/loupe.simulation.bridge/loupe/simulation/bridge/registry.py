@@ -12,12 +12,12 @@ A vendor extension registers once, in its on_startup:
 
     registry.register(
         "beckhoff", AdsDriver,
-        [Option("AmsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
+        [Option("amsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
         legacy_namespace="beckhoff_bridge",
     )
 
 and unregisters in on_shutdown. The framework then recognises PLC prims with
-`bridge:driver = "beckhoff"`, reads the option `beckhoff:AmsNetId` from them,
+`bridge:driver = "beckhoff"`, reads the option `beckhoff:amsNetId` from them,
 builds `AdsDriver(ams_net_id=...)`, and (because of `legacy_namespace`) also
 accepts 0.2.x prims that carry `beckhoff_bridge:AmsNetId` and pushes the
 0.2.x bus names.
@@ -40,7 +40,7 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def snake_case(name: str) -> str:
-    """'AmsNetId' -> 'ams_net_id', 'Host' -> 'host', 'URL' -> 'url'."""
+    """'amsNetId' -> 'ams_net_id', 'AmsNetId' -> 'ams_net_id', 'host' -> 'host', 'URL' -> 'url'."""
     return _CAMEL.sub("_", name).lower()
 
 
@@ -51,7 +51,8 @@ class Option:
 
     Attributes:
         key: the attribute name under the driver's prim namespace
-            ("AmsNetId" -> `beckhoff:AmsNetId`) and the key in the options dict.
+            ("amsNetId" -> `beckhoff:amsNetId`) and the key in the options dict.
+            lowerCamelCase, the USD convention for property names.
         kind: one of KINDS.
         default: the value when the prim does not carry the attribute.
         label: what the UI shows next to the field.
@@ -62,6 +63,9 @@ class Option:
         arg: the driver constructor's keyword for this option (and the driver
             attribute the framework assigns when the option changes at
             runtime). Defaults to the key in snake_case.
+        legacy_key: the name of the option under the 0.1/0.2 namespace
+            (`beckhoff_bridge:AmsNetId`). Defaults to the key with its first
+            letter upper-cased, which is how every 0.2.x option was spelled.
     """
 
     key: str
@@ -70,6 +74,7 @@ class Option:
     label: str = ""
     secret: bool = False
     arg: Optional[str] = None
+    legacy_key: Optional[str] = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -80,6 +85,11 @@ class Option:
     @property
     def arg_name(self) -> str:
         return self.arg or snake_case(self.key)
+
+    @property
+    def legacy_name(self) -> str:
+        """The bare key under the 0.2.x namespace ("amsNetId" -> "AmsNetId")."""
+        return self.legacy_key or (self.key[:1].upper() + self.key[1:])
 
     def coerce(self, value: Any) -> Any:
         """
@@ -146,6 +156,13 @@ class DriverSpec:
                 return option
         return None
 
+    def option_by_legacy_key(self, key: str) -> Optional[Option]:
+        """The option a 0.2.x bare key ("AmsNetId") stands for, or None."""
+        for option in self.options:
+            if option.legacy_name == key:
+                return option
+        return None
+
     def attribute(self, key: str) -> str:
         """The prim attribute name of an option: `<namespace>:<key>`."""
         return f"{self.namespace}:{key}"
@@ -154,7 +171,8 @@ class DriverSpec:
         """The 0.2.x prim attribute name of an option, or None without a legacy namespace."""
         if self.legacy_namespace is None:
             return None
-        return f"{self.legacy_namespace}:{key}"
+        option = self.option(key)
+        return f"{self.legacy_namespace}:{option.legacy_name if option else key}"
 
     def resolve(self, options: Optional[dict]) -> dict:
         """key -> value for every option: the given value, coerced, else the default."""

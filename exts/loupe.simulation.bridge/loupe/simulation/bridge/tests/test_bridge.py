@@ -112,10 +112,10 @@ class SilentDriver(FakeDriver):
 
 
 OPTIONS = [
-    Option("Address", "str", "127.0.0.1", "Address"),
-    Option("Port", "int", 1, "Port"),
-    Option("Token", "str", "", "Token", secret=True),
-    Option("Flag", "bool", False, "Flag"),
+    Option("address", "str", "127.0.0.1", "address"),
+    Option("port", "int", 1, "port"),
+    Option("token", "str", "", "token", secret=True),
+    Option("flag", "bool", False, "flag"),
 ]
 
 
@@ -186,26 +186,27 @@ class TestRegistry(omni.kit.test.AsyncTestCase):
         registry.clear()
 
     async def test_register_get_and_defaults(self):
-        spec = registry.register("fake", FakeDriver, OPTIONS, defaults={"Port": 9})
+        spec = registry.register("fake", FakeDriver, OPTIONS, defaults={"port": 9})
         self.assertIs(registry.get("fake"), spec)
         self.assertEqual(registry.names(), ["fake"])
-        self.assertEqual(spec.defaults, {"Address": "127.0.0.1", "Port": 9, "Token": "", "Flag": False})
+        self.assertEqual(spec.defaults, {"address": "127.0.0.1", "port": 9, "token": "", "flag": False})
         self.assertEqual(spec.namespace, "fake")
-        self.assertEqual(spec.attribute("Port"), "fake:Port")
+        self.assertEqual(spec.attribute("port"), "fake:port")
         self.assertIsNone(spec.legacy_namespace)
 
     async def test_create_driver_uses_snake_case_kwargs(self):
         spec = registry.register("fake", FakeDriver, OPTIONS)
-        driver = spec.create_driver({"Address": "10.0.0.1", "Port": "7", "Flag": "true"})
+        driver = spec.create_driver({"address": "10.0.0.1", "port": "7", "flag": "true"})
         self.assertEqual((driver.address, driver.port, driver.flag), ("10.0.0.1", 7, True))
         self.assertEqual(registry.snake_case("AmsNetId"), "ams_net_id")
+        self.assertEqual(registry.snake_case("amsNetId"), "ams_net_id")
 
     async def test_apply_option_changes_live_driver(self):
         spec = registry.register("fake", FakeDriver, OPTIONS)
         driver = spec.create_driver({})
-        self.assertTrue(spec.apply_option(driver, "Port", 42))
+        self.assertTrue(spec.apply_option(driver, "port", 42))
         self.assertEqual(driver.port, 42)
-        self.assertFalse(spec.apply_option(driver, "Port", 42))
+        self.assertFalse(spec.apply_option(driver, "port", 42))
         self.assertFalse(spec.apply_option(driver, "Unknown", 1))
 
     async def test_validation(self):
@@ -240,8 +241,8 @@ class TestRegistry(omni.kit.test.AsyncTestCase):
 
 class TestDiscovery(BridgeTestCase):
     async def test_neutral_and_legacy_prims(self):
-        self.define("/PLC/N1", {ATTR_DRIVER: "fake", ATTR_ENABLE: False, "bridge:RefreshRate": 30,
-                                ATTR_VARIABLES: ["GVL.a", "GVL.b"], "fake:Address": "10.1.1.1", "fake:Port": 5})
+        self.define("/PLC/N1", {ATTR_DRIVER: "fake", ATTR_ENABLE: False, "bridge:periodMs": 30,
+                                ATTR_VARIABLES: ["GVL.a", "GVL.b"], "fake:address": "10.1.1.1", "fake:port": 5})
         self.define("/PLC/L1", {"fake_bridge:Address": "10.2.2.2", "fake_bridge:Enable": False,
                                 "fake_bridge:RefreshRate": 40, "fake_bridge:Variables": "GVL.a, GVL.b,"})
         self.define("/World/Other", {"foo:bar": 1})
@@ -252,10 +253,10 @@ class TestDiscovery(BridgeTestCase):
         n1 = next(c for c in configs if c.name == "N1")
         l1 = next(c for c in configs if c.name == "L1")
         self.assertEqual((n1.driver, n1.legacy, n1.refresh_ms, n1.variables), ("fake", False, 30, ["GVL.a", "GVL.b"]))
-        self.assertEqual(n1.options, {"Address": "10.1.1.1", "Port": 5, "Token": "", "Flag": False})
+        self.assertEqual(n1.options, {"address": "10.1.1.1", "port": 5, "token": "", "flag": False})
         self.assertEqual((l1.driver, l1.legacy, l1.refresh_ms, l1.variables), ("fake", True, 40, ["GVL.a", "GVL.b"]))
-        self.assertEqual(l1.options["Address"], "10.2.2.2")
-        self.assertEqual(l1.options["Port"], 1)
+        self.assertEqual(l1.options["address"], "10.2.2.2")
+        self.assertEqual(l1.options["port"], 1)
         # the deprecation warning is tracked once per prim
         self.assertEqual(warned, {"/PLC/L1"})
         discover(self.stage, "/PLC/", warned)
@@ -269,14 +270,14 @@ class TestDiscovery(BridgeTestCase):
         self.assertEqual(rt.read_variables, ["GVL.a", "GVL.b"])
         self.assertEqual(rt.refresh_rate, 40)
         # legacy and neutral option spellings both apply
-        rt.options = {"fake_bridge:Port": 8, "fake:Address": "3.3.3.3", "bridge:Variables": ["GVL.a"]}
+        rt.options = {"fake_bridge:Port": 8, "fake:address": "3.3.3.3", "bridge:variables": ["GVL.a"]}
         self.assertEqual((rt.driver.port, rt.driver.address, rt.read_variables), (8, "3.3.3.3", ["GVL.a"]))
         # the prim going away removes the component
         self.stage.RemovePrim("/PLC/L1")
         self.assertEqual(self.system.find_and_create_components(), ["N1"])
 
     async def test_unregistered_driver_is_reported_then_picked_up(self):
-        self.define("/PLC/X1", {ATTR_DRIVER: "later", "later:Address": "1.1.1.1"})
+        self.define("/PLC/X1", {ATTR_DRIVER: "later", "later:address": "1.1.1.1"})
         self.assertEqual(self.system.find_and_create_components(), [])
         self.assertEqual(self.system.unresolved, {"/PLC/X1": "later"})
         registry.register("later", FakeDriver, OPTIONS[:1])
@@ -286,20 +287,41 @@ class TestDiscovery(BridgeTestCase):
         registry.unregister("later")
         self.assertEqual(self.system.get_component_names(), [])
 
+    async def test_a_bus_write_while_disabled_is_dropped_with_one_warning(self):
+        # 0.2.x held it for the connection; 0.3 drops it, and a bus caller has
+        # no handle to look at, so the adapter says so once.
+        self.system.add_component("W1", {ATTR_ENABLE: False}, author_prim=False, driver="fake")
+        with self.assertLogs("loupe.simulation.bridge.bus", level="WARNING") as logs:
+            Manager("W1").write_variable("GVL.a", 1.0)
+            Manager("W1").write_variable("GVL.a", 2.0)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("GVL.a", logs.output[0])
+        self.assertEqual(self.system.get_component("W1").driver.writes, [])
+
+    async def test_add_component_takes_0_2_names_only_under_the_legacy_namespace(self):
+        # `fake:Port` (a PascalCase key in the neutral namespace) was never
+        # released and is ignored, as Runtime.options ignores it; the 0.2.x
+        # spelling is honoured under `fake_bridge:`; an unknown key is dropped.
+        rt = self.system.add_component(
+            "Legacy1", {"fake:Port": 9, "fake_bridge:Port": 4, "fake:nope": 1},
+            author_prim=False, driver="fake")
+        self.assertEqual(rt.driver.port, 4)
+        self.assertEqual(rt.options["fake:port"], 4)
+
     async def test_add_component_authors_neutral_prim_and_keeps_secret_reference(self):
         os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "s3cret"
-        rt = self.system.add_component("New1", {"fake:Port": 3, "Token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
+        rt = self.system.add_component("New1", {"fake:port": 3, "token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
         prim = self.stage.GetPrimAtPath("/PLC/New1")
         self.assertTrue(prim.IsValid())
         self.assertEqual(prim.GetAttribute(ATTR_DRIVER).Get(), "fake")
-        self.assertEqual(prim.GetAttribute("fake:Port").Get(), 3)
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(prim.GetAttribute("fake:port").Get(), 3)
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
         self.assertEqual(rt.driver.token, "s3cret")
-        self.assertEqual(rt.options["fake:Token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(rt.options["fake:token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
         rt.set_read_variables(["GVL.a"])
         self.system.write_options_to_stage("New1")
         self.assertEqual(list(prim.GetAttribute(ATTR_VARIABLES).Get()), ["GVL.a"])
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
 
     async def test_auto_connect_setting_holds_enabled_prims(self):
         self.define("/PLC/H1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True})
@@ -320,8 +342,8 @@ class TestDiscovery(BridgeTestCase):
 
 class TestDelivery(BridgeTestCase):
     async def test_on_sample_main_coalesces_on_the_main_thread(self):
-        self.define("/PLC/D1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 1,
-                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/D1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 1,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         rt = self.system.get_component("D1")
         worker = []
@@ -351,8 +373,8 @@ class TestDelivery(BridgeTestCase):
         from .. import on_sample_main
         got = []
         remove = on_sample_main("D2", got.append)
-        self.define("/PLC/D2", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
-                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/D2", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         t0 = time.time()
         while time.time() - t0 < 1.0 and not got:
@@ -388,8 +410,8 @@ class TestBus(BridgeTestCase):
         manager = Manager("B1", namespace="fake_bridge")
         manager.register_data_callback(lambda e: got.setdefault("manager", []).append(e.payload["meta"]["name"]))
         # Subscribed before the runtime exists: the first events are not missed.
-        self.define("/PLC/B1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
-                                ATTR_VARIABLES: ["GVL.a", "bad.x"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/B1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
+                                ATTR_VARIABLES: ["GVL.a", "bad.x"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         # DATA_INIT is pushed once per namespace when the adapter is built
         self.assertEqual(got["init_neutral"], [{"name": "B1"}])
@@ -438,8 +460,8 @@ class TestBus(BridgeTestCase):
         got = []
         manager = Manager("B3")
         manager.register_data_callback(lambda e: got.append(e.payload["data"]))
-        self.define("/PLC/B3", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
-                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/B3", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         self.assertTrue(await until(lambda: got))
         self.assertEqual(got[0], {"GVL": {"a": 1.0}})
@@ -451,7 +473,15 @@ class TestBus(BridgeTestCase):
 
     async def test_bus_payload_sends_sparse_arrays_as_index_dicts(self):
         dense = {"GVL": {"Axes": [{"p": 1.0}, {"p": 2.0}], "b": True}}
-        self.assertIs(bus_payload(dense), dense)
+        self.assertEqual(bus_payload(dense), dense)
+        self.assertIsNot(bus_payload(dense), dense)   # always a copy
+        # a read-only sample (mapping proxies, tuples) becomes plain dicts and lists
+        from plc_bridge import freeze
+        frozen = freeze(dense)
+        plain = bus_payload(frozen)
+        self.assertIs(type(plain), dict)
+        self.assertIs(type(plain["GVL"]["Axes"]), list)
+        self.assertEqual(bus_payload(freeze({"a": [None, 1]})), {"a": {"1": 1}})
         sample = {"GVL": {"Axes": [None, None, {"p": 3.0, "q": [1, None, 3]}, {"p": 4.0}], "b": True},
                   "M": [[None, 5]]}
         self.assertEqual(bus_payload(sample), {
@@ -464,19 +494,19 @@ class TestBus(BridgeTestCase):
         got = []
         manager = Manager("B4")
         manager.register_data_callback(lambda e: got.append(e.payload["data"]))
-        self.define("/PLC/B4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
-                                ATTR_VARIABLES: ["GVL.arr", "GVL.a"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/B4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
+                                ATTR_VARIABLES: ["GVL.arr", "GVL.a"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         self.assertTrue(await until(lambda: got))
         self.assertEqual(got[0]["GVL"]["arr"], {"0": 10.0, "2": 12.0})
         self.assertEqual(got[0]["GVL"]["a"], 1.0)
         # on_sample still gets the list
-        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], [10.0, None, 12.0])
+        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], (10.0, None, 12.0))
         manager.cleanup()
 
     async def test_legacy_names_off_by_setting(self):
         self.settings.set(SETTING_LEGACY_BUS, False)
-        self.define("/PLC/B2", {ATTR_DRIVER: "fake", "bridge:MirrorToUsd": False})
+        self.define("/PLC/B2", {ATTR_DRIVER: "fake", "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         adapter = self.system.get_part("B2", "bus")
         self.assertEqual(adapter.namespaces, [BUS_NAMESPACE])
@@ -501,7 +531,7 @@ class TestMirror(BridgeTestCase):
         # stage being replaced under them while data flows: an exception in a
         # Tf notice handler is logged as TF_PYTHON_EXCEPTION, which
         # omni.kit.test counts as a failure.
-        self.define("/PLC/M9", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M9", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["GVL.a", "GVL.arr", "GVL.s"]})
         self.system.find_and_create_components()
         self.assertIsNotNone(await self._wait_for("/PLC/M9/GVL/a"))
@@ -515,7 +545,7 @@ class TestMirror(BridgeTestCase):
         # A component created without a prim (a vendor's in-memory compat
         # PLC), mirrored, re-created after every rescan the way the B&R
         # compat module does, while the stage is replaced.
-        options = {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        options = {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                    ATTR_VARIABLES: ["GVL.a", "GVL.arr", "GVL.s"]}
         self.system.add_component("M8", options, author_prim=False)
         self.assertIsNotNone(await self._wait_for("/PLC/M8/GVL/a"))
@@ -534,7 +564,7 @@ class TestMirror(BridgeTestCase):
         self.system.remove_component("M8")
 
     async def test_watch_list_arrays_and_structs(self):
-        self.define("/PLC/M1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["GVL.a", "GVL.b", "GVL.arr", "GVL.s"],
                                 ATTR_MIRROR_SYMBOLS: ["GVL.a", "GVL.arr", "GVL.s"]})
         self.system.find_and_create_components()
@@ -561,13 +591,13 @@ class TestMirror(BridgeTestCase):
         self.assertIsNotNone(self.stage.GetSessionLayer().GetPrimAtPath("/PLC/M1/GVL/a"))
 
     async def test_mirror_off_by_prim(self):
-        self.define("/PLC/M2", {ATTR_DRIVER: "fake", "bridge:MirrorToUsd": False})
+        self.define("/PLC/M2", {ATTR_DRIVER: "fake", "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         self.assertIsNone(self.system.get_part("M2", "mirror"))
         self.assertIsNotNone(self.system.get_part("M2", "bus"))
 
     async def test_write_back_keeps_the_driver_symbol_spelling(self):
-        self.define("/PLC/M3", {ATTR_DRIVER: "colon", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M3", {ATTR_DRIVER: "colon", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["Prog:x"]})
         self.system.find_and_create_components()
         rt = self.system.get_component("M3")
@@ -595,25 +625,25 @@ class TestMirror(BridgeTestCase):
         from ..schema import PlcConfig
         spec = registry.get("fake")
         config = PlcConfig("R1", "/PLC/R1", "fake", enabled=True, refresh_ms=15, variables=["GVL.a"],
-                           mirror=False, mirror_symbols=["GVL.a"], options={"Address": "9.9.9.9", "Port": 2, "Token": "x"})
+                           mirror=False, mirror_symbols=["GVL.a"], options={"address": "9.9.9.9", "port": 2, "token": "x"})
         prim = self.stage.DefinePrim("/PLC/R1", "Scope")
-        author_config(prim, config, spec, {"Token": "env:T"})
+        author_config(prim, config, spec, {"token": "env:T"})
         configs, _, _ = discover(self.stage, "/PLC/", set())
         back = configs[0]
         self.assertEqual((back.enabled, back.refresh_ms, back.variables, back.mirror, back.mirror_symbols),
                          (True, 15, ["GVL.a"], False, ["GVL.a"]))
-        self.assertEqual(back.options["Address"], "9.9.9.9")
-        self.assertEqual(back.options["Token"], "env:T")
+        self.assertEqual(back.options["address"], "9.9.9.9")
+        self.assertEqual(back.options["token"], "env:T")
 
 
 class TestRobustness(BridgeTestCase):
     async def test_malformed_prim_does_not_stop_the_others(self):
-        self.define("/PLC/Good1", {ATTR_DRIVER: "fake", "fake:Port": 3})
+        self.define("/PLC/Good1", {ATTR_DRIVER: "fake", "fake:port": 3})
         bad_port = self.define("/PLC/BadPort", {ATTR_DRIVER: "fake"})
-        bad_port.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("8000a")
+        bad_port.CreateAttribute("fake:port", Sdf.ValueTypeNames.String, custom=True).Set("8000a")
         bad_vars = self.define("/PLC/BadVars", {ATTR_DRIVER: "fake"})
         bad_vars.CreateAttribute(ATTR_VARIABLES, Sdf.ValueTypeNames.Int, custom=True).Set(5)
-        self.define("/PLC/Good2", {ATTR_DRIVER: "fake", "fake:Port": 4})
+        self.define("/PLC/Good2", {ATTR_DRIVER: "fake", "fake:port": 4})
         names = self.system.find_and_create_components()
         self.assertEqual(sorted(names), ["Good1", "Good2"])
         self.assertEqual(sorted(self.system.invalid), ["/PLC/BadPort", "/PLC/BadVars"])
@@ -622,7 +652,7 @@ class TestRobustness(BridgeTestCase):
 
     async def test_unresolvable_secret_is_reported_not_dropped(self):
         os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
-        self.define("/PLC/S1", {ATTR_DRIVER: "fake", "fake:Token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"})
+        self.define("/PLC/S1", {ATTR_DRIVER: "fake", "fake:token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"})
         self.define("/PLC/S2", {ATTR_DRIVER: "fake"})
         names = self.system.find_and_create_components()
         self.assertEqual(names, ["S2"])
@@ -632,13 +662,13 @@ class TestRobustness(BridgeTestCase):
     async def test_set_driver_option_keeps_state_when_the_secret_fails(self):
         os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "good"
         os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
-        rt = self.system.add_component("S3", {"Token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
+        rt = self.system.add_component("S3", {"token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
         with self.assertRaises(LookupError):
-            rt.set_driver_option("Token", "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN")
+            rt.set_driver_option("token", "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN")
         self.assertEqual(rt.driver.token, "good")
-        self.assertEqual(rt.options["fake:Token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(rt.options["fake:token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
         self.system.write_options_to_stage("S3")
-        self.assertEqual(self.stage.GetPrimAtPath("/PLC/S3").GetAttribute("fake:Token").Get(),
+        self.assertEqual(self.stage.GetPrimAtPath("/PLC/S3").GetAttribute("fake:token").Get(),
                          "env:LOUPE_BRIDGE_TEST_TOKEN")
 
     async def test_write_to_usd_retypes_a_string_variables_attribute(self):
@@ -654,7 +684,7 @@ class TestRobustness(BridgeTestCase):
         self.assertEqual(list(attr.Get()), ["GVL.c"])
 
     async def test_mirror_settings_change_rebuilds_the_mirror(self):
-        self.define("/PLC/M4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M4", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["GVL.a", "GVL.b"], ATTR_MIRROR_SYMBOLS: ["GVL.a"]})
         self.system.find_and_create_components()
         rt = self.system.get_component("M4")
@@ -670,16 +700,16 @@ class TestRobustness(BridgeTestCase):
         self.assertIsNot(second, first)
         self.assertEqual(second.watch, ["GVL.b"])
         self.assertTrue(await until(lambda: self.stage.GetPrimAtPath("/PLC/M4/GVL/b").IsValid()))
-        rt.options = {"bridge:MirrorToUsd": False}
+        rt.options = {"bridge:mirrorToUsd": False}
         await ticks(1)
         self.assertIsNone(self.system.get_part("M4", "mirror"))
         self.assertEqual(self.system.delivery.listeners("M4"), 0)
-        rt.options = {"bridge:MirrorToUsd": True}
+        rt.options = {"bridge:mirrorToUsd": True}
         await ticks(1)
         self.assertIsNotNone(self.system.get_part("M4", "mirror"))
 
     async def test_mirror_change_from_a_worker_thread_rebuilds_on_main(self):
-        self.define("/PLC/M5", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M5", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["GVL.a"], ATTR_MIRROR_SYMBOLS: ["GVL.a"]})
         self.system.find_and_create_components()
         rt = self.system.get_component("M5")
@@ -712,40 +742,40 @@ class TestRobustness(BridgeTestCase):
         prim = sub_stage.DefinePrim("/PLC/T2", "Scope")
         prim.CreateAttribute(ATTR_DRIVER, Sdf.ValueTypeNames.String, custom=True).Set("fake")
         prim.CreateAttribute(ATTR_VARIABLES, Sdf.ValueTypeNames.String, custom=True).Set("GVL.a")
-        prim.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("7")
+        prim.CreateAttribute("fake:port", Sdf.ValueTypeNames.String, custom=True).Set("7")
         self.stage.GetRootLayer().subLayerPaths.append(sub.identifier)
         self.stage.SetEditTarget(self.stage.GetRootLayer())
         self.system.find_and_create_components()
         rt = self.system.get_component("T2")
         self.assertEqual((rt.read_variables, rt.driver.port), (["GVL.a"], 7))
         rt.set_read_variables(["GVL.b", "GVL.c"])
-        rt.set_driver_option("Port", 9)
+        rt.set_driver_option("port", 9)
         self.system.write_options_to_stage("T2")   # must not raise
         attr = self.stage.GetPrimAtPath("/PLC/T2").GetAttribute(ATTR_VARIABLES)
         self.assertEqual(attr.GetTypeName(), Sdf.ValueTypeNames.String)
         self.assertEqual(attr.Get(), "GVL.b,GVL.c")
-        port = self.stage.GetPrimAtPath("/PLC/T2").GetAttribute("fake:Port")
+        port = self.stage.GetPrimAtPath("/PLC/T2").GetAttribute("fake:port")
         self.assertEqual((port.GetTypeName(), port.Get()), (Sdf.ValueTypeNames.String, "9"))
         self.assertEqual(self.stage.GetPrimAtPath("/PLC/T2").GetAttribute(ATTR_ENABLE).GetTypeName(),
                          Sdf.ValueTypeNames.Bool)
 
     async def test_update_from_usd_reports_a_malformed_attribute(self):
-        prim = self.define("/PLC/U1", {ATTR_DRIVER: "fake", "fake:Port": 3})
+        prim = self.define("/PLC/U1", {ATTR_DRIVER: "fake", "fake:port": 3})
         self.system.find_and_create_components()
-        prim.RemoveProperty("fake:Port")
-        prim.CreateAttribute("fake:Port", Sdf.ValueTypeNames.String, custom=True).Set("3x")
+        prim.RemoveProperty("fake:port")
+        prim.CreateAttribute("fake:port", Sdf.ValueTypeNames.String, custom=True).Set("3x")
         self.system.read_options_from_stage("U1")   # must not raise
         self.assertIn("/PLC/U1", self.system.invalid)
         self.assertEqual(self.system.get_component("U1").driver.port, 3)
-        prim.GetAttribute("fake:Port").Set("4")
+        prim.GetAttribute("fake:port").Set("4")
         self.system.read_options_from_stage("U1")
         self.assertNotIn("/PLC/U1", self.system.invalid)
         self.assertEqual(self.system.get_component("U1").driver.port, 4)
 
     async def test_no_delivery_after_removal_from_inside_a_callback(self):
         from .. import on_sample_main
-        self.define("/PLC/R1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 1,
-                                ATTR_VARIABLES: ["GVL.a"], "bridge:MirrorToUsd": False})
+        self.define("/PLC/R1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 1,
+                                ATTR_VARIABLES: ["GVL.a"], "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         calls = []
         later = []
@@ -782,7 +812,7 @@ class TestRobustness(BridgeTestCase):
         registry.register("silent", SilentDriver, OPTIONS)
         SilentDriver.instances.clear()
         self.define("/PLC/C1", {ATTR_DRIVER: "silent", ATTR_ENABLE: True, ATTR_VARIABLES: ["GVL.a"],
-                                "bridge:MirrorToUsd": False})
+                                "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         rt = self.system.get_component("C1")
         self.assertTrue(await until(lambda: rt.plc.latest() is not None))
@@ -800,7 +830,7 @@ class TestRobustness(BridgeTestCase):
         SilentDriver.instances.clear()
         for name in ("S1", "S2"):
             self.define(f"/PLC/{name}", {ATTR_DRIVER: "silent", ATTR_ENABLE: True, ATTR_VARIABLES: ["GVL.a"],
-                                         "bridge:RefreshRate": 5, "bridge:MirrorToUsd": False})
+                                         "bridge:periodMs": 5, "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         runtimes = [self.system.get_component(n) for n in ("S1", "S2")]
         self.assertTrue(await until(lambda: all(rt.plc.latest() is not None for rt in runtimes)))
@@ -833,8 +863,8 @@ class TestRobustness(BridgeTestCase):
 def Scope "PLC" {
     def Scope "F1" {
         custom string bridge:driver = "fake"
-        custom string[] bridge:Variables = ["GVL.a"]
-        custom bool bridge:MirrorToUsd = false
+        custom string[] bridge:variables = ["GVL.a"]
+        custom bool bridge:mirrorToUsd = false
     }
 }
 ''')
@@ -863,7 +893,7 @@ class TestWindowAndEdits(BridgeTestCase):
 
     async def test_stage_rebuild_moves_the_window_to_the_new_runtime(self):
         from plc_bridge import EVENT_CONNECTION, EVENT_PROBLEM
-        self.define("/PLC/W1", {ATTR_DRIVER: "fake", "bridge:MirrorToUsd": False})
+        self.define("/PLC/W1", {ATTR_DRIVER: "fake", "bridge:mirrorToUsd": False})
         self.system.find_and_create_components()
         window, system_ui = self._build_window()
         try:
@@ -905,7 +935,7 @@ class TestWindowAndEdits(BridgeTestCase):
     async def test_failed_add_component_leaves_no_prim(self):
         os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
         with self.assertRaises(LookupError):
-            self.system.add_component("A1", {"Token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"}, driver="fake")
+            self.system.add_component("A1", {"token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"}, driver="fake")
         self.assertFalse(self.stage.GetPrimAtPath("/PLC/A1").IsValid())
         with self.assertRaises(Exception):
             self.system.add_component("bad name", {}, driver="fake")
@@ -914,19 +944,19 @@ class TestWindowAndEdits(BridgeTestCase):
 
     async def test_plain_secret_drops_the_old_reference(self):
         os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "s3cret"
-        rt = self.system.add_component("P1", {"Token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
+        rt = self.system.add_component("P1", {"token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
         prim = self.stage.GetPrimAtPath("/PLC/P1")
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
-        self.assertTrue(rt.set_driver_option("Token", "typed-in"))
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertTrue(rt.set_driver_option("token", "typed-in"))
         self.assertEqual(rt.driver.token, "typed-in")
-        self.assertNotIn("Token", rt.secret_refs)
-        prim.RemoveProperty("fake:Token")
+        self.assertNotIn("token", rt.secret_refs)
+        prim.RemoveProperty("fake:token")
         self.system.write_options_to_stage("P1")
         # neither the old reference nor the plain value is authored
-        self.assertFalse(prim.GetAttribute("fake:Token").IsValid())
+        self.assertFalse(prim.GetAttribute("fake:token").IsValid())
 
     async def test_write_once_or_unpause_without_a_value_sends_nothing(self):
-        self.define("/PLC/M6", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:RefreshRate": 5,
+        self.define("/PLC/M6", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
                                 ATTR_VARIABLES: ["GVL.a"]})
         self.system.find_and_create_components()
         rt = self.system.get_component("M6")
@@ -978,7 +1008,7 @@ class TestVersionCheck(omni.kit.test.AsyncTestCase):
         manager = omni.kit.app.get_app().get_extension_manager()
         ext_id = manager.get_enabled_extension_id("loupe.simulation.bridge")
         requirements = self.versions.extension_requirements(ext_id)
-        self.assertTrue(any(r.startswith("plc-bridge==") for r in requirements), requirements)
+        self.assertIn("plc-bridge>=0.3.0,<0.4", requirements)
         logged = []
         self.assertEqual(self.versions.check_extension_requirements(ext_id, log=logged.append), [])
         self.assertEqual(logged, [])
@@ -995,7 +1025,7 @@ class TestVersionCheck(omni.kit.test.AsyncTestCase):
         self.assertEqual(len(problems), 1)
         self.assertEqual(logged, problems)
         self.assertIn("plc-bridge 0.3.0rc1", problems[0])
-        self.assertIn("loupe.simulation.bridge needs plc-bridge==", problems[0])
+        self.assertIn("loupe.simulation.bridge needs plc-bridge>=0.3.0,<0.4", problems[0])
         self.assertIn("delete the folder " + env, problems[0])
 
     async def test_ranges_and_unpinned_requirements(self):
@@ -1013,6 +1043,10 @@ class TestVersionCheck(omni.kit.test.AsyncTestCase):
         self.assertFalse(satisfies("0.3.0rc1", ">=0.3.0,<0.4"))
         self.assertTrue(satisfies("0.3.0", "==0.3"))
         self.assertTrue(satisfies("0.3.9", ">=0.3.0,<0.4"))
+        self.assertTrue(satisfies("0.3.0", ">=0.3.0,<0.4"))
+        self.assertTrue(satisfies("0.3.0.post1", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.2.9", ">=0.3.0,<0.4"))
+        self.assertFalse(satisfies("0.3.0", ">=0.3.1,<0.4"))
         self.assertFalse(satisfies("0.4.0", ">=0.3.0,<0.4"))
         self.assertFalse(satisfies("0.4.0rc1", ">=0.3.0,<0.4"))
         self.assertFalse(satisfies("0.4.0.dev1", "<0.4"))

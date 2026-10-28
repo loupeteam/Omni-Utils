@@ -22,7 +22,7 @@ Bus payloads (`event.payload`):
 | CONNECTION      | `{"meta", "status": "Connecting" / "Connected" / "Disconnected"}` |
 | STATUS          | neutral: `{"meta", "status": {"kind", "text", "symbols"}}`; legacy: `status` is the text |
 | ENABLE          | `{"meta", "status": {"enabled": bool}}`                    |
-| WRITE           | neutral only: `{"meta", "values", "errors", "error"}` per flushed batch |
+| WRITE           | neutral only: `{"meta", "values", "errors", "codes", "error"}` per flushed batch; `codes` is symbol -> `missing` / `rejected` / `other` |
 | DATA_READ_REQ   | request in: `{"variables": [names]}`                        |
 | DATA_WRITE_REQ  | request in: `{"variables": [{"name", "value"}]}`             |
 
@@ -30,7 +30,8 @@ A sparse array (a PLC that reads `Axes[2]` but not `Axes[0]`) is `None`-padded
 in the nested sample. carb cannot hold `None` in a sequence, so DATA_READ sends
 such a list as a dict keyed by index strings, `{"2": {...}}`: what carb itself
 made of it in 0.2.x, without its warning per element per push (see
-`bus_payload`). Dense arrays stay lists.
+`bus_payload`). Dense arrays stay lists. The payload is a plain copy of the
+read-only sample.
 
 The pushes happen on the runtime's worker thread, as they did in 0.2.x; a
 subscriber that touches the stage or the UI marshals to the main thread
@@ -38,11 +39,13 @@ itself, or uses `on_sample_main` instead.
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Callable, Optional
 
 import carb.events
 import carb.settings
 import omni.kit.app
+from plc_bridge import CONNECTED, WRITE_NOT_CONNECTED
 
 from .BridgeManager import BridgeManager, Manager_Events
 
@@ -75,28 +78,23 @@ def legacy_bus_names_enabled() -> bool:
 
 def bus_payload(value):
     """
-    `value` with every list that holds a `None` replaced by a dict of its
-    other elements keyed by index string; anything else is returned as is.
+    A plain copy of `value` that carb can hold: mappings (the read-only
+    MappingProxyType of a Sample) become dicts, tuples and lists become lists,
+    and every array that holds a `None` becomes a dict of its other elements
+    keyed by index string. Always a copy, never the sample's own objects: a
+    Sample is read-only and shared by every listener.
 
-    carb converts such a list to that same dict on its own, but logs
+    carb converts a list with `None` to that same dict on its own, but logs
     "Unknown type in sequence being written to item" for every `None` on
     every push; at 50 Hz that is hundreds of log lines a second, and Kit's
     log keeps them, so the process grows while data flows.
     """
-    if isinstance(value, dict):
-        out = None
-        for key, item in value.items():
-            converted = bus_payload(item)
-            if converted is not item:
-                if out is None:
-                    out = dict(value)
-                out[key] = converted
-        return value if out is None else out
-    if isinstance(value, list):
+    if isinstance(value, Mapping):
+        return {key: bus_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
         if any(item is None for item in value):
             return {str(index): bus_payload(item) for index, item in enumerate(value) if item is not None}
-        converted = [bus_payload(item) for item in value]
-        return value if all(a is b for a, b in zip(converted, value)) else converted
+        return [bus_payload(item) for item in value]
     return value
 
 
@@ -114,6 +112,7 @@ class BusAdapter:
     def __init__(self, runtime, namespaces):
         self._runtime = runtime
         self._name = runtime.name
+        self._warned_not_connected = False
         self._namespaces = list(namespaces)
         self._events = [Manager_Events(ns) for ns in self._namespaces]
         self._stream = omni.kit.app.get_app().get_message_bus_event_stream()
@@ -167,6 +166,8 @@ class BusAdapter:
             self._push(events.EVENT_TYPE_STATUS, {"status": structured if index == 0 else problem.text})
 
     def _on_connection(self, state):
+        if state == CONNECTED:
+            self._warned_not_connected = False
         for events in self._events:
             self._push(events.EVENT_TYPE_CONNECTION, {"status": state})
 
@@ -175,8 +176,13 @@ class BusAdapter:
             self._push(events.EVENT_TYPE_ENABLE, {"status": {"enabled": enabled}})
 
     def _on_write(self, result):
-        self._push(EVENT_TYPE_WRITE, {"values": dict(result.values), "errors": dict(result.errors),
-                                      "error": result.error})
+        # Errors as plain text plus their codes: carb holds strings, not the
+        # SymbolError str subclass.
+        self._push(EVENT_TYPE_WRITE, {
+            "values": bus_payload(result.values),
+            "errors": {name: str(error) for name, error in result.errors.items()},
+            "codes": {name: getattr(error, "code", "other") for name, error in result.errors.items()},
+            "error": result.error})
 
     # endregion
     # region - Bus -> runtime
@@ -185,8 +191,18 @@ class BusAdapter:
         self._runtime.add_read_variables(event.payload["variables"])
 
     def _on_write_req(self, event):
+        refused = []
         for variable in event.payload["variables"]:
-            self._runtime.queue_write(variable["name"], variable["value"])
+            handle = self._runtime.queue_write(variable["name"], variable["value"])
+            if handle.done and handle.error == WRITE_NOT_CONNECTED:
+                refused.append(variable["name"])
+        # A 0.2.x script never sees the handle, and 0.2.x held such writes for
+        # the connection; say once per disconnected spell that they are dropped.
+        if refused and not self._warned_not_connected:
+            self._warned_not_connected = True
+            logger.warning("%s: write of %s dropped: the PLC is not connected or not enabled "
+                           "(writes are not held for a later connection since 0.3.0)",
+                           self._name, ", ".join(refused))
 
     # endregion
 

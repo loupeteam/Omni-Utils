@@ -34,11 +34,13 @@ icon = "data/icon.png"
 
 [python.pipapi]
 # The polling runtime and the driver contract are the plain-Python plc-bridge
-# package (plc_bridge/ at the root of this repo). The framework owns the exact
-# pin: Kit installs every extension's pip requirements into one site-packages
-# and does not resolve conflicts, so vendor extensions pin only their own
-# library and take plc-bridge from here.
-requirements = ["plc-bridge==0.3.0"]
+# package (plc_bridge/ at the root of this repo). The framework owns the pin:
+# Kit installs every extension's pip requirements into one site-packages and
+# does not resolve conflicts, so vendor extensions pin only their own library
+# and take plc-bridge from here. A range within the minor version; raise the
+# lower bound with each framework release, so the startup version check
+# (versions.py) catches an older plc-bridge left in Kit's pip folder.
+requirements = ["plc-bridge>=0.3.0,<0.4"]
 # What pipapi imports to decide whether the requirement is already satisfied;
 # it calls pip only when this import fails, so an editable install into Kit's
 # Python (tools/dev_link.py) takes precedence over the bundled wheel. A
@@ -56,7 +58,7 @@ name = "loupe.simulation.bridge"
 public = true
 
 [settings.exts."loupe.simulation.bridge"]
-# When false, a prim whose bridge:Enable is true still comes up disabled, so a
+# When false, a prim whose bridge:enable is true still comes up disabled, so a
 # committed stage cannot open a connection to hardware by surprise; the UI
 # says why. Enable from the UI or from code as usual.
 autoConnect = true

@@ -10,21 +10,25 @@ documented place for them, and the prim path is the identity. The neutral
 attributes are the same for every vendor:
 
     custom string   bridge:driver        = "beckhoff"
-    custom bool     bridge:Enable        = false
-    custom int      bridge:RefreshRate   = 20            # milliseconds
-    custom string[] bridge:Variables     = ["GVL.Axes[0].ActualPosition"]
-    custom bool     bridge:MirrorToUsd   = true          # absent means true in 0.3
-    custom string[] bridge:MirrorSymbols = []            # empty means every variable
+    custom bool     bridge:enable        = false
+    custom int      bridge:periodMs      = 20            # scan period, milliseconds
+    custom string[] bridge:variables     = ["GVL.Axes[0].ActualPosition"]
+    custom bool     bridge:mirrorToUsd   = true          # absent means true in 0.3
+    custom string[] bridge:mirrorSymbols = []            # empty means every variable
 
 and the driver's own options sit under its namespace:
 
-    custom string   beckhoff:AmsNetId    = "127.0.0.1.1.1"
-    custom string   br:Host              = "127.0.0.1"
-    custom int      br:Port              = 8000
+    custom string   beckhoff:amsNetId    = "127.0.0.1.1.1"
+    custom string   br:host              = "127.0.0.1"
+    custom int      br:port              = 8000
+
+Names are lowerCamelCase, the USD convention for property names. The 0.1/0.2
+attributes keep their PascalCase spelling (below).
 
 Legacy rule (0.3 only, warned once per prim): a prim with no `bridge:driver`
 but with `<legacy_namespace>:*` attributes of a registered driver
-(`beckhoff_bridge:AmsNetId`, `br_bridge:Host`) is treated as that driver;
+(`beckhoff_bridge:AmsNetId`, `br_bridge:Host`, see Option.legacy_name) is
+treated as that driver;
 `<legacy_namespace>:Enable / RefreshRate / Variables` stand in for the neutral
 attributes, `Variables` being the 0.2.x comma-separated string.
 
@@ -45,11 +49,11 @@ from .registry import DriverSpec, Option
 logger = logging.getLogger(__name__)
 
 ATTR_DRIVER = "bridge:driver"
-ATTR_ENABLE = "bridge:Enable"
-ATTR_REFRESH = "bridge:RefreshRate"
-ATTR_VARIABLES = "bridge:Variables"
-ATTR_MIRROR = "bridge:MirrorToUsd"
-ATTR_MIRROR_SYMBOLS = "bridge:MirrorSymbols"
+ATTR_ENABLE = "bridge:enable"
+ATTR_REFRESH = "bridge:periodMs"
+ATTR_VARIABLES = "bridge:variables"
+ATTR_MIRROR = "bridge:mirrorToUsd"
+ATTR_MIRROR_SYMBOLS = "bridge:mirrorSymbols"
 
 #: The neutral attributes with their defaults, in the order the UI shows them.
 NEUTRAL_DEFAULTS = {
@@ -195,7 +199,7 @@ def classify(prim: Usd.Prim):
         if spec.legacy_namespace is None:
             continue
         prefix = spec.legacy_namespace + ":"
-        keys = [option.key for option in spec.options] + list(_LEGACY_NEUTRAL)
+        keys = [option.legacy_name for option in spec.options] + list(_LEGACY_NEUTRAL)
         if any(prim.HasAttribute(prefix + key) for key in keys):
             return spec.name, spec, True
     return None
@@ -211,7 +215,7 @@ def read_config(prim: Usd.Prim, spec: DriverSpec, legacy: bool, root: str = DEFA
         config.refresh_ms = _get(prim, ns + "RefreshRate", NEUTRAL_DEFAULTS[ATTR_REFRESH])
         config.variables = _as_list(_get(prim, ns + "Variables"))
         for option in spec.options:
-            config.options[option.key] = option.coerce(_get(prim, ns + option.key))
+            config.options[option.key] = option.coerce(_get(prim, ns + option.legacy_name))
     else:
         config.enabled = bool(_get(prim, ATTR_ENABLE, False))
         config.refresh_ms = _get(prim, ATTR_REFRESH, NEUTRAL_DEFAULTS[ATTR_REFRESH])
@@ -323,7 +327,7 @@ def set_attr(prim: Usd.Prim, name: str, value, type_name: Optional[Sdf.ValueType
     """
     Set an attribute, creating it with `type_name` when the prim lacks it.
 
-    An attribute authored with another type (bridge:Variables as a string,
+    An attribute authored with another type (bridge:variables as a string,
     say) is recreated in the edit target; when the old type survives from a
     stronger or weaker layer (a sublayer, a referenced asset) the value is
     coerced to that type instead, and when it cannot be, the attribute is

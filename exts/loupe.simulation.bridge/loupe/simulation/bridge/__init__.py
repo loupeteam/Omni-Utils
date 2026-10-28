@@ -9,6 +9,8 @@ Public surface, re-exported here:
     registry   register(), get(), names(): vendor extensions register a driver
     Option     one entry of a driver's option schema
     get_system(), get_plc(name), on_sample_main(name, cb)   data delivery
+               on the System: get_component, get_component_names and
+               add_component are public; its other methods are internal
     Manager    the 0.2.x bus-based API, on the neutral bus names
     Manager_Events, get_stream_name, legacy_bus_names_enabled, BUS_NAMESPACE
                the bus names, for the vendor extensions' deprecated modules

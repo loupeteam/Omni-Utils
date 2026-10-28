@@ -6,7 +6,7 @@ Copyright (c) 2024 Loupe, https://loupe.team
 Part of Omni-Utils, licensed under the MIT License.
 
 A registered component (see System.py), created for a PLC whose prim has
-`bridge:MirrorToUsd` true (absent means true in 0.3). It takes the newest
+`bridge:mirrorToUsd` true (absent means true in 0.3). It takes the newest
 sample once per app update through the main-thread delivery, so everything
 here runs on the main thread, and it uses the sample's flat `values`
 directly: the symbol a value was read under is the symbol written back, so a
@@ -25,13 +25,14 @@ Layout, for a Beckhoff symbol `GVL.Axes[0].ActualPosition` on `/PLC/PLC1`:
 
 A struct or array read whole (one symbol whose value is a dict or list) is
 expanded into members and `_<index>` children the same way; `None` entries of
-a padded array are skipped. `bridge:MirrorSymbols` narrows the mirror to the
+a padded array are skipped. `bridge:mirrorSymbols` narrows the mirror to the
 listed symbols (and everything under them); empty means every variable.
 """
 
 import ast
 import logging
 import re
+from collections.abc import Mapping
 from contextlib import contextmanager
 
 import numpy as np
@@ -47,7 +48,7 @@ ATTR_WRITE_ONCE = "write:once"
 ATTR_WRITE_SYMBOL = "symbol"
 
 # Kept for code that imported it from here; the schema module owns it now.
-ATTR_MIRROR_USD = "bridge:MirrorToUsd"
+ATTR_MIRROR_USD = "bridge:mirrorToUsd"
 
 # How many times a symbol may fail to be written before it is given up on. More
 # than one because a failure is not always permanent: create_attr fixes an
@@ -277,7 +278,7 @@ def expand_value(symbol: str, value, out: dict) -> dict:
     `symbol.member`; a list or tuple (an array read whole, or the parser's
     `None`-padded list) contributes `symbol[index]` for every non-None entry.
     """
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for member, item in value.items():
             expand_value(f"{symbol}.{member}", item, out)
     elif isinstance(value, (list, tuple)):
