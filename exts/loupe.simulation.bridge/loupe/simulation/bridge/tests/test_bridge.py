@@ -287,6 +287,17 @@ class TestDiscovery(BridgeTestCase):
         registry.unregister("later")
         self.assertEqual(self.system.get_component_names(), [])
 
+    async def test_a_bus_write_while_disabled_is_dropped_with_one_warning(self):
+        # 0.2.x held it for the connection; 0.3 drops it, and a bus caller has
+        # no handle to look at, so the adapter says so once.
+        self.system.add_component("W1", {ATTR_ENABLE: False}, author_prim=False, driver="fake")
+        with self.assertLogs("loupe.simulation.bridge.bus", level="WARNING") as logs:
+            Manager("W1").write_variable("GVL.a", 1.0)
+            Manager("W1").write_variable("GVL.a", 2.0)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("GVL.a", logs.output[0])
+        self.assertEqual(self.system.get_component("W1").driver.writes, [])
+
     async def test_add_component_takes_0_2_names_only_under_the_legacy_namespace(self):
         # `fake:Port` (a PascalCase key in the neutral namespace) was never
         # released and is ignored, as Runtime.options ignores it; the 0.2.x

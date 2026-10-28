@@ -45,6 +45,7 @@ from typing import Any, Callable, Optional
 import carb.events
 import carb.settings
 import omni.kit.app
+from plc_bridge import CONNECTED, WRITE_NOT_CONNECTED
 
 from .BridgeManager import BridgeManager, Manager_Events
 
@@ -111,6 +112,7 @@ class BusAdapter:
     def __init__(self, runtime, namespaces):
         self._runtime = runtime
         self._name = runtime.name
+        self._warned_not_connected = False
         self._namespaces = list(namespaces)
         self._events = [Manager_Events(ns) for ns in self._namespaces]
         self._stream = omni.kit.app.get_app().get_message_bus_event_stream()
@@ -164,6 +166,8 @@ class BusAdapter:
             self._push(events.EVENT_TYPE_STATUS, {"status": structured if index == 0 else problem.text})
 
     def _on_connection(self, state):
+        if state == CONNECTED:
+            self._warned_not_connected = False
         for events in self._events:
             self._push(events.EVENT_TYPE_CONNECTION, {"status": state})
 
@@ -187,8 +191,18 @@ class BusAdapter:
         self._runtime.add_read_variables(event.payload["variables"])
 
     def _on_write_req(self, event):
+        refused = []
         for variable in event.payload["variables"]:
-            self._runtime.queue_write(variable["name"], variable["value"])
+            handle = self._runtime.queue_write(variable["name"], variable["value"])
+            if handle.done and handle.error == WRITE_NOT_CONNECTED:
+                refused.append(variable["name"])
+        # A 0.2.x script never sees the handle, and 0.2.x held such writes for
+        # the connection; say once per disconnected spell that they are dropped.
+        if refused and not self._warned_not_connected:
+            self._warned_not_connected = True
+            logger.warning("%s: write of %s dropped: the PLC is not connected or not enabled "
+                           "(writes are not held for a later connection since 0.3.0)",
+                           self._name, ", ".join(refused))
 
     # endregion
 

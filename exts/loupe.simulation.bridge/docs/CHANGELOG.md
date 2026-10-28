@@ -28,6 +28,9 @@ vendor code behind a driver registry.
 - A write queued while the PLC is disconnected or disabled fails at once with
   `"not connected"`, as does one pending when the link drops or the PLC is
   disabled; writes are never held for a later connection.
+  A write that comes in over the bus (`Manager.write_variable`, a 0.2.x
+  script) has no handle to report this, so the bus adapter logs one warning
+  per disconnected spell naming the dropped symbols.
 - `System.get_component`, `get_component_names` and `add_component` are the
   public System API; the rest of System is documented as internal.
 - Driver registry: `registry.register(name, driver_class, option_schema, defaults, ui_panel)`
