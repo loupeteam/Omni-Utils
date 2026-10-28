@@ -277,7 +277,7 @@ class TestDiscovery(BridgeTestCase):
         self.assertEqual(self.system.find_and_create_components(), ["N1"])
 
     async def test_unregistered_driver_is_reported_then_picked_up(self):
-        self.define("/PLC/X1", {ATTR_DRIVER: "later", "later:Address": "1.1.1.1"})
+        self.define("/PLC/X1", {ATTR_DRIVER: "later", "later:address": "1.1.1.1"})
         self.assertEqual(self.system.find_and_create_components(), [])
         self.assertEqual(self.system.unresolved, {"/PLC/X1": "later"})
         registry.register("later", FakeDriver, OPTIONS[:1])
@@ -294,13 +294,13 @@ class TestDiscovery(BridgeTestCase):
         self.assertTrue(prim.IsValid())
         self.assertEqual(prim.GetAttribute(ATTR_DRIVER).Get(), "fake")
         self.assertEqual(prim.GetAttribute("fake:port").Get(), 3)
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
         self.assertEqual(rt.driver.token, "s3cret")
-        self.assertEqual(rt.options["fake:Token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(rt.options["fake:token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
         rt.set_read_variables(["GVL.a"])
         self.system.write_options_to_stage("New1")
         self.assertEqual(list(prim.GetAttribute(ATTR_VARIABLES).Get()), ["GVL.a"])
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
 
     async def test_auto_connect_setting_holds_enabled_prims(self):
         self.define("/PLC/H1", {ATTR_DRIVER: "fake", ATTR_ENABLE: True})
@@ -480,7 +480,7 @@ class TestBus(BridgeTestCase):
         self.assertEqual(got[0]["GVL"]["arr"], {"0": 10.0, "2": 12.0})
         self.assertEqual(got[0]["GVL"]["a"], 1.0)
         # on_sample still gets the list
-        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], [10.0, None, 12.0])
+        self.assertEqual(self.system.get_component("B4").plc.latest().nested["GVL"]["arr"], (10.0, None, 12.0))
         manager.cleanup()
 
     async def test_legacy_names_off_by_setting(self):
@@ -631,7 +631,7 @@ class TestRobustness(BridgeTestCase):
 
     async def test_unresolvable_secret_is_reported_not_dropped(self):
         os.environ.pop("LOUPE_BRIDGE_TEST_MISSING_TOKEN", None)
-        self.define("/PLC/S1", {ATTR_DRIVER: "fake", "fake:Token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"})
+        self.define("/PLC/S1", {ATTR_DRIVER: "fake", "fake:token": "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN"})
         self.define("/PLC/S2", {ATTR_DRIVER: "fake"})
         names = self.system.find_and_create_components()
         self.assertEqual(names, ["S2"])
@@ -645,9 +645,9 @@ class TestRobustness(BridgeTestCase):
         with self.assertRaises(LookupError):
             rt.set_driver_option("token", "env:LOUPE_BRIDGE_TEST_MISSING_TOKEN")
         self.assertEqual(rt.driver.token, "good")
-        self.assertEqual(rt.options["fake:Token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(rt.options["fake:token"], "env:LOUPE_BRIDGE_TEST_TOKEN")
         self.system.write_options_to_stage("S3")
-        self.assertEqual(self.stage.GetPrimAtPath("/PLC/S3").GetAttribute("fake:Token").Get(),
+        self.assertEqual(self.stage.GetPrimAtPath("/PLC/S3").GetAttribute("fake:token").Get(),
                          "env:LOUPE_BRIDGE_TEST_TOKEN")
 
     async def test_write_to_usd_retypes_a_string_variables_attribute(self):
@@ -925,14 +925,14 @@ class TestWindowAndEdits(BridgeTestCase):
         os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "s3cret"
         rt = self.system.add_component("P1", {"token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")
         prim = self.stage.GetPrimAtPath("/PLC/P1")
-        self.assertEqual(prim.GetAttribute("fake:Token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
+        self.assertEqual(prim.GetAttribute("fake:token").Get(), "env:LOUPE_BRIDGE_TEST_TOKEN")
         self.assertTrue(rt.set_driver_option("token", "typed-in"))
         self.assertEqual(rt.driver.token, "typed-in")
         self.assertNotIn("token", rt.secret_refs)
-        prim.RemoveProperty("fake:Token")
+        prim.RemoveProperty("fake:token")
         self.system.write_options_to_stage("P1")
         # neither the old reference nor the plain value is authored
-        self.assertFalse(prim.GetAttribute("fake:Token").IsValid())
+        self.assertFalse(prim.GetAttribute("fake:token").IsValid())
 
     async def test_write_once_or_unpause_without_a_value_sends_nothing(self):
         self.define("/PLC/M6", {ATTR_DRIVER: "fake", ATTR_ENABLE: True, "bridge:periodMs": 5,
