@@ -16,7 +16,7 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from .driver import ERROR_MISSING, ERROR_OTHER, ERROR_REJECTED, PlcDriver, symbol_error
+from .driver import ERROR_MISSING, ERROR_OTHER, ERROR_REJECTED, PlcDriver, SymbolError, symbol_error
 from .symbols import nest
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,11 @@ class Sample:
         """
         return freeze(nest(self.values, self.separators))
 
+    def __reduce__(self):
+        # MappingProxyType cannot be pickled or deep-copied; rebuild from plain
+        # dicts, which __post_init__ wraps again.
+        return (Sample, (self.seq, self.t, dict(self.values), dict(self.errors), self.separators))
+
     @property
     def missing(self) -> tuple:
         """The symbols the PLC does not know (error code ERROR_MISSING), sorted."""
@@ -165,8 +170,8 @@ class WriteHandle:
     The fate of one queued write. `wait()` blocks until the write was sent (or
     failed); `error` is None on success, otherwise the reason:
 
-    * a SymbolError (a str with `.code` ERROR_MISSING or ERROR_REJECTED) when
-      the PLC failed this symbol;
+    * a SymbolError with `.code` ERROR_MISSING or ERROR_REJECTED when the PLC
+      failed this symbol;
     * WRITE_NOT_CONNECTED ("not connected") when the runtime was not connected
       and enabled when the write was queued, or the connection dropped or the
       runtime was disabled before it went out. Writes are never held for a
@@ -175,16 +180,21 @@ class WriteHandle:
       replaced this pending one;
     * WRITE_STOPPED ("stopped") when stop() found it pending;
     * the error text when the whole request failed.
+
+    Every non-None `error` is a SymbolError, so `.code` is always there; the
+    reasons that are not about the symbol (not connected, superseded, stopped,
+    a failed request) carry ERROR_OTHER and still compare equal to their text
+    (`handle.error == WRITE_NOT_CONNECTED`).
     """
 
     def __init__(self, name: str, value: Any):
         self.name = name
         self.value = value
-        self.error: Optional[str] = None
+        self.error: Optional[SymbolError] = None
         self._done = threading.Event()
 
     def _resolve(self, error: Optional[str]):
-        self.error = error
+        self.error = None if error is None else symbol_error(error, ERROR_OTHER)
         self._done.set()
 
     @property
@@ -470,12 +480,20 @@ class PlcRuntime:
             A WriteHandle to wait on or inspect. Ignore it if you do not care.
         """
         handle = WriteHandle(name, value)
-        if not (self._is_connected and self._enabled):
+        # The check and the insert are one step under the lock. Every path that
+        # takes the runtime out of connected-and-enabled changes the state
+        # first and then drains the queue under this lock, so a write either
+        # sees the old state and is drained, or sees the new one and is
+        # refused; it can never slip in after the drain and reach the next
+        # connection.
+        with self._write_lock:
+            accepted = self._is_connected and self._enabled
+            if accepted:
+                previous = self._write_queue.get(name)
+                self._write_queue[name] = (value, handle)
+        if not accepted:
             handle._resolve(WRITE_NOT_CONNECTED)
             return handle
-        with self._write_lock:
-            previous = self._write_queue.get(name)
-            self._write_queue[name] = (value, handle)
         if previous is not None:
             previous[1]._resolve(WRITE_SUPERSEDED)
         self._wake()

@@ -30,7 +30,7 @@ to `latest()`:
 
 | Field | Type | Notes |
 |---|---|---|
-| `values`, `errors` | `types.MappingProxyType` | indexing, `in`, `.items()` and `==` with a dict work; assignment raises `TypeError`. A value the driver returned whole (an array as a list) is not copied. |
+| `values`, `errors` | `types.MappingProxyType` | indexing, `in`, `.items()` and `==` with a dict work; assignment raises `TypeError`. A value the driver returned whole (an array as a list) is not copied, so it is the one shared object, not read-only: never change it in place; use `nested`, or copy it first. |
 | `nested` | `MappingProxyType` all the way down, arrays as **tuples** | `nested["GVL"]["Axes"][0]` works; a sparse array keeps `None` where nothing was read. A tuple does not compare equal to a list, and `isinstance(x, dict)` is false: test for `collections.abc.Mapping`. |
 
 For a copy you can change, use `dict(sample.values)` or

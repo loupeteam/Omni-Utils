@@ -40,7 +40,7 @@ plc.driver.close()   # once you are done with the driver for good
 | `on_problem(cb)` | a `Problem` (`kind`, `text`, `symbols`) when a problem starts, every 2 s while it persists, and once (`kind == "ok"`) when a read problem clears. |
 | `on_status(cb)` | `Problem.text` only; the 0.2.x shape. |
 | `on_connection(cb)` | `Connecting`, `Connected`, `Disconnected`. |
-| `queue_write(name, value)` | returns a `WriteHandle`; `wait()` blocks until the write went out, `ok` / `error` say how it went. A write queued while not connected and enabled, or still pending when the link drops or the runtime is disabled, fails with `"not connected"`; nothing is held for a later connection. `on_write(cb)` gets a `WriteResult` per flushed batch. |
+| `queue_write(name, value)` | returns a `WriteHandle`; `wait()` blocks until the write went out, `ok` / `error` say how it went. A write queued while not connected and enabled, or still pending when the link drops or the runtime is disabled, fails with `"not connected"`; nothing is held for a later connection. Every `error` is a `SymbolError`; reasons that are not about the symbol carry code `other`. `on_write(cb)` gets a `WriteResult` per flushed batch. |
 
 Listeners run on the runtime's worker thread. A host with a main thread
 marshals to it itself, or polls `latest()` from its own loop.

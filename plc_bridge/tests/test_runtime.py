@@ -194,6 +194,43 @@ def test_a_write_queued_while_disabled_fails_at_once(driver):
     assert handle.done and handle.error == "not connected"
 
 
+def test_a_write_racing_a_disconnect_is_refused_not_held(plc, driver):
+    # The link drops while queue_write waits for the queue: the write must be
+    # refused, not slip in after the drain and reach the next connection.
+    from plc_bridge import WRITE_NOT_CONNECTED
+    plc.scan_read()
+    real = plc._write_lock
+
+    class DropFirst:
+        armed = True
+
+        def __enter__(self):
+            if DropFirst.armed:
+                DropFirst.armed = False
+                plc._write_lock = real
+                plc._close_connection()
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    plc._write_lock = DropFirst()
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.done and handle.error == WRITE_NOT_CONNECTED
+    plc.scan_read()                       # reconnects
+    assert plc.scan_write() is False and driver.writes == []
+
+
+def test_every_write_error_carries_a_code(plc, driver):
+    from plc_bridge import ERROR_OTHER, WRITE_NOT_CONNECTED, WRITE_SUPERSEDED
+    handle = plc.queue_write("GVL.a", 1)
+    assert handle.error == WRITE_NOT_CONNECTED and handle.error.code == ERROR_OTHER
+    plc.scan_read()
+    first = plc.queue_write("GVL.a", 1)
+    plc.queue_write("GVL.a", 2)
+    assert first.error == WRITE_SUPERSEDED and first.error.code == ERROR_OTHER
+
+
 def test_disable_fails_pending_writes(plc, driver):
     plc.scan_read()
     handle = plc.queue_write("GVL.a", 1)
@@ -1138,6 +1175,18 @@ def test_a_hand_built_sample_is_read_only_too():
     with pytest.raises(TypeError):
         s.values["a"] = 2
     assert s.errors["b"] == "bad" and s.errors["b"].code == ERROR_OTHER
+
+
+def test_a_sample_pickles_and_deep_copies():
+    import copy
+    import pickle
+    from plc_bridge import ERROR_MISSING, Sample, SymbolError
+    s = Sample(3, 1.5, {"GVL.arr": [1, 2]}, {"GVL.x": SymbolError("symbol not found", ERROR_MISSING)})
+    for again in (pickle.loads(pickle.dumps(s)), copy.deepcopy(s)):
+        assert again == s and again.missing == ("GVL.x",)
+        assert again.errors["GVL.x"].code == ERROR_MISSING
+        with pytest.raises(TypeError):
+            again.values["GVL.arr"] = 0
 
 
 def test_symbol_error_is_a_str_with_a_code():
