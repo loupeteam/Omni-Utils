@@ -287,6 +287,16 @@ class TestDiscovery(BridgeTestCase):
         registry.unregister("later")
         self.assertEqual(self.system.get_component_names(), [])
 
+    async def test_add_component_takes_0_2_names_only_under_the_legacy_namespace(self):
+        # `fake:Port` (a PascalCase key in the neutral namespace) was never
+        # released and is ignored, as Runtime.options ignores it; the 0.2.x
+        # spelling is honoured under `fake_bridge:`; an unknown key is dropped.
+        rt = self.system.add_component(
+            "Legacy1", {"fake:Port": 9, "fake_bridge:Port": 4, "fake:nope": 1},
+            author_prim=False, driver="fake")
+        self.assertEqual(rt.driver.port, 4)
+        self.assertEqual(rt.options["fake:port"], 4)
+
     async def test_add_component_authors_neutral_prim_and_keeps_secret_reference(self):
         os.environ["LOUPE_BRIDGE_TEST_TOKEN"] = "s3cret"
         rt = self.system.add_component("New1", {"fake:port": 3, "token": "env:LOUPE_BRIDGE_TEST_TOKEN"}, driver="fake")

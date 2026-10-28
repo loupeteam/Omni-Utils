@@ -141,15 +141,18 @@ from beckhoff_bridge import AdsDriver
 
 registry.register(
     "beckhoff", AdsDriver,
-    [Option("AmsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
+    [Option("amsNetId", "str", "127.0.0.1.1.1", "PLC AMS Net Id")],
     legacy_namespace="beckhoff_bridge",     # 0.2.x prims and bus names
     title="Beckhoff (ADS)",
 )
 ```
 
-`Option(key, kind, default, label, secret=False, arg=None)` with kinds `str`,
-`int`, `float`, `bool`, `str_list`. The driver's constructor gets one keyword
-per option, `arg` or the key in snake_case (`AmsNetId` -> `ams_net_id`); a
+`Option(key, kind, default, label, secret=False, arg=None, legacy_key=None)`
+with kinds `str`, `int`, `float`, `bool`, `str_list`. `key` is lowerCamelCase
+(`beckhoff:amsNetId`); `legacy_key` is the option's 0.2.x name under the legacy
+namespace and defaults to the key with a capital first letter
+(`beckhoff_bridge:AmsNetId`). The driver's constructor gets one keyword per
+option, `arg` or the key in snake_case (`amsNetId` -> `ams_net_id`); a
 changed option is assigned to the live driver as an attribute of the same
 name and the connection is reopened. `registry.unregister(name)` in
 `on_shutdown`; the 0.3.0 vendor extensions do exactly that.

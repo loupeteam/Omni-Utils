@@ -318,10 +318,11 @@ class System:
 
     @staticmethod
     def _apply_option_dict(config: PlcConfig, spec: DriverSpec, options: dict):
-        from .schema import ATTR_ENABLE, ATTR_MIRROR, ATTR_MIRROR_SYMBOLS, ATTR_REFRESH, ATTR_VARIABLES, _as_list
+        from .schema import (ATTR_DRIVER, ATTR_ENABLE, ATTR_MIRROR, ATTR_MIRROR_SYMBOLS, ATTR_REFRESH,
+                             ATTR_VARIABLES, _as_list)
         legacy = (spec.legacy_namespace + ":") if spec.legacy_namespace else None
         for key, value in options.items():
-            if value is None:
+            if value is None or key == ATTR_DRIVER:   # the driver was chosen by the caller
                 continue
             if key == ATTR_ENABLE or (legacy and key == legacy + "Enable"):
                 config.enabled = bool(value)
@@ -334,13 +335,20 @@ class System:
             elif key == ATTR_MIRROR_SYMBOLS:
                 config.mirror_symbols = _as_list(value)
             else:
-                bare = key
-                for prefix in (spec.namespace + ":", legacy):
-                    if prefix and key.startswith(prefix):
-                        bare = key[len(prefix):]
-                option = spec.option(bare) or spec.option_by_legacy_key(bare)
-                if option is not None:
-                    config.options[option.key] = option.coerce(value)
+                # The same spellings Runtime.options accepts: the neutral
+                # namespace takes only the lowerCamelCase key; a 0.2.x key
+                # ("AmsNetId") is honoured bare or under the legacy namespace.
+                neutral = spec.namespace + ":"
+                if key.startswith(neutral):
+                    option = spec.option(key[len(neutral):])
+                elif legacy and key.startswith(legacy):
+                    option = spec.option_by_legacy_key(key[len(legacy):])
+                else:
+                    option = spec.option(key) or spec.option_by_legacy_key(key)
+                if option is None:
+                    logger.warning("add_component: unknown option %r for driver %r ignored", key, spec.name)
+                    continue
+                config.options[option.key] = option.coerce(value)
 
     def create_component_prim(self, name: str, config: PlcConfig, spec: Optional[DriverSpec] = None) -> str:
         """Define the PLC prim and write the config onto it in the neutral form. Returns the prim path."""

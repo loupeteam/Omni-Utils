@@ -23,6 +23,7 @@ import time
 
 import omni.kit.app
 import omni.ui as ui
+from plc_bridge import thaw
 
 from . import registry
 from .System import System
@@ -327,7 +328,7 @@ class SystemUI:
         if self._frame % MONITOR_EVERY_FRAMES or self._monitor_field is None:
             return
         try:
-            self._monitor_field.model.set_value(json.dumps(sample.nested, indent=2, sort_keys=True, default=str))
+            self._monitor_field.model.set_value(json.dumps(thaw(sample.nested), indent=2, sort_keys=True, default=str))
         except Exception:
             pass
 

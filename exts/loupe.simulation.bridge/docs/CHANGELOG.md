@@ -19,6 +19,9 @@ vendor code behind a driver registry.
   `WriteResult.errors`, `WriteHandle.error`) is a `plc_bridge.SymbolError`, a
   `str` with `.code` `missing`, `rejected` or `other`. `Sample.missing` lists
   the symbols the PLC does not know. The bus WRITE payload carries `codes`.
+  `WriteHandle.error` reasons that are not about the symbol (`not connected`,
+  `superseded`, `stopped`, a failed request) carry `other`, so `.code` is
+  always there.
 - `Sample.values`, `Sample.errors` and `Sample.nested` are read-only
   (`MappingProxyType`, arrays in `nested` as tuples); `plc_bridge.thaw()`
   makes a mutable copy. The bus sends a plain copy.
@@ -73,7 +76,7 @@ vendor code behind a driver registry.
   of the `None`-padded list in 0.2.x, but carb logged a warning per missing
   element per push, and Kit kept those log lines: the process grew about 1 MB
   a minute while data flowed. `on_sample`, `on_sample_main` and `latest()`
-  still get the padded list.
+  still get the padded array, a tuple in `Sample.nested`.
 - The mirror writes, and reacts to edits, only while its stage is the
   context's open stage, so replacing the stage while a PLC is delivering data
   no longer writes into the outgoing stage.
